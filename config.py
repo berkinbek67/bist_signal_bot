@@ -31,5 +31,9 @@ VOLUME_AVG_PERIOD = 20    # rolling window to compare current volume against
 # Score ranges from -6 to +6 (six factors). Alert fires when |score| >= this.
 ALERT_SCORE_THRESHOLD = 2
 
+# Fraction of the current Bollinger Band width used for the suggested
+# "invalidation" reference level in alerts (0.25 = 25% of the band width).
+STOP_BAND_FRACTION = 0.25
+
 # --- How often the bot checks for a new signal (only used when run locally in a loop) ---
 CHECK_INTERVAL_SECONDS = 60
