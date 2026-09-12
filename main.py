@@ -30,6 +30,7 @@ from config import (
     BB_STD_DEV,
     VOLUME_AVG_PERIOD,
     ALERT_SCORE_THRESHOLD,
+    STOP_BAND_FRACTION,
     CHECK_INTERVAL_SECONDS,
 )
 
@@ -149,6 +150,36 @@ def classify(score: int) -> str:
     return "NEUTRAL"
 
 
+def compute_price_range(df: pd.DataFrame, verdict: str) -> dict | None:
+    """
+    Suggest a reference entry/target/invalidation level using the current
+    Bollinger Band width as a stand-in for volatility (we don't have true
+    high/low data, only close prices, so this is an approximation).
+
+    This is a reference level based on current volatility, NOT a
+    prediction and NOT financial advice.
+    """
+    if "BUY" not in verdict and "SELL" not in verdict:
+        return None
+
+    curr = df.iloc[-1]
+    price = curr["close"]
+    band_width = curr["bb_upper"] - curr["bb_lower"]
+
+    if "BUY" in verdict:
+        return {
+            "entry": price,
+            "target": curr["bb_upper"],
+            "invalidation": price - STOP_BAND_FRACTION * band_width,
+        }
+    else:  # SELL
+        return {
+            "entry": price,
+            "target": curr["bb_lower"],
+            "invalidation": price + STOP_BAND_FRACTION * band_width,
+        }
+
+
 def send_telegram_message(text: str) -> None:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
@@ -174,10 +205,20 @@ def run_once() -> None:
         breakdown_lines = "\n".join(
             f"  {name}: {'+' if val > 0 else ''}{val}" for name, val in result["breakdown"].items()
         )
+        price_range = compute_price_range(df, verdict)
+        range_lines = ""
+        if price_range:
+            range_lines = (
+                f"\nReference levels (not a prediction):\n"
+                f"  Entry: {price_range['entry']:.2f}\n"
+                f"  Target: {price_range['target']:.2f}\n"
+                f"  Invalidation: {price_range['invalidation']:.2f}\n"
+            )
         message = (
             f"{verdict} ({result['total']:+d}/6) on {label}\n"
             f"Price: {last_close}\n"
             f"{breakdown_lines}\n"
+            f"{range_lines}"
             f"Time: {now}"
         )
         send_telegram_message(message)
