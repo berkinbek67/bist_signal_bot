@@ -30,24 +30,30 @@ VOLUME_AVG_PERIOD = 20
 
 # --- Weighted scoring ---
 # Trend/momentum indicators count more than short-term confirmation ones.
-# Funding rate is genuinely independent information (leveraged trader
-# positioning, not derived from price/volume), so it's weighted like a
-# trend indicator. Max possible score = sum of all weights = 11. Min = -11.
+# Funding rate and Supertrend are genuinely independent information
+# (leveraged trader positioning, and a well-established ATR trend model)
+# rather than more of the same price-derived math, so both are weighted
+# like trend indicators. Max possible score = sum of all weights = 13.
 INDICATOR_WEIGHTS = {
     "EMA crossover": 2,
     "Trend (vs EMA200)": 2,
     "MACD": 2,
     "Funding Rate": 2,
+    "Supertrend": 2,
     "RSI": 1,
     "Volume": 1,
     "Bollinger Bands": 1,
 }
 
-# Thresholds on the WEIGHTED score (range -11 to +11)
-BUY_THRESHOLD = 5
-STRONG_BUY_THRESHOLD = 9
-SELL_THRESHOLD = -5
-STRONG_SELL_THRESHOLD = -9
+# Thresholds on the WEIGHTED score (range -13 to +13)
+BUY_THRESHOLD = 6
+STRONG_BUY_THRESHOLD = 10
+SELL_THRESHOLD = -6
+STRONG_SELL_THRESHOLD = -10
+
+# Supertrend parameters (from the original Pine Script defaults)
+SUPERTREND_PERIOD = 10
+SUPERTREND_MULTIPLIER = 3.0
 
 # --- Spot trading behavior ---
 # This bot only ever does: BUY (enter), HOLD (do nothing), SELL (exit).
