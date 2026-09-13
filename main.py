@@ -18,6 +18,7 @@ import time
 import requests
 import pandas as pd
 from funding_rate import get_aggregated_funding_rate, score_funding_rate
+from supertrend import fetch_ohlc, compute_supertrend, score_supertrend
 from datetime import datetime, timezone
 from config import (
     TELEGRAM_BOT_TOKEN,
@@ -105,10 +106,12 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def score_signal(df: pd.DataFrame, funding_score: int | None = None) -> dict:
-    """Score seven factors from -1/0/+1 each, then apply weights.
-    funding_score is computed separately (it needs its own network calls
-    to exchange APIs, not just the price/volume dataframe)."""
+def score_signal(df: pd.DataFrame, funding_score: int | None = None,
+                  supertrend_score: int | None = None) -> dict:
+    """Score up to eight factors from -1/0/+1 each, then apply weights.
+    funding_score and supertrend_score are computed separately since they
+    need their own data sources (exchange APIs / OHLC candles), not just
+    the price/volume dataframe."""
     prev, curr = df.iloc[-2], df.iloc[-1]
     breakdown = {}
 
@@ -142,6 +145,9 @@ def score_signal(df: pd.DataFrame, funding_score: int | None = None) -> dict:
 
     if funding_score is not None:
         breakdown["Funding Rate"] = funding_score
+
+    if supertrend_score is not None:
+        breakdown["Supertrend"] = supertrend_score
 
     raw_total = sum(breakdown.values())
     weighted_total = sum(val * INDICATOR_WEIGHTS[name] for name, val in breakdown.items())
@@ -270,7 +276,7 @@ def build_status_message(df: pd.DataFrame, result: dict, classification: str) ->
         f"Status for {COIN_ID}/{VS_CURRENCY}\n"
         f"Price: {curr['close']:.2f}\n"
         f"RSI: {curr['rsi']:.1f}\n"
-        f"Weighted score: {result['weighted_total']:+d}/11 -> {classification}\n"
+        f"Weighted score: {result['weighted_total']:+d}/13 -> {classification}\n"
         f"{breakdown_lines}\n"
         f"Time: {now}"
     )
@@ -319,7 +325,17 @@ def run_once() -> None:
     except Exception as e:
         print(f"[!] Funding rate lookup skipped: {e}")
 
-    result = score_signal(df, funding_score=funding_score)
+    supertrend_score = None
+    try:
+        ohlc_df = fetch_ohlc(COIN_ID)
+        ohlc_df = compute_supertrend(ohlc_df)
+        latest_trend = ohlc_df.iloc[-1]["supertrend_trend"]
+        supertrend_score = score_supertrend(latest_trend)
+        print(f"    supertrend: trend={latest_trend}")
+    except Exception as e:
+        print(f"[!] Supertrend lookup skipped: {e}")
+
+    result = score_signal(df, funding_score=funding_score, supertrend_score=supertrend_score)
     classification = classify(result["weighted_total"])
 
     current_price = df.iloc[-1]["close"]
@@ -357,7 +373,7 @@ def run_once() -> None:
             )
         pnl_line = f"\nRealized P/L: {pnl_pct:+.2%}\n" if action == "SELL" else ""
         message = (
-            f"{action} on {label} ({classification}, weighted score {result['weighted_total']:+d}/11)\n"
+            f"{action} on {label} ({classification}, weighted score {result['weighted_total']:+d}/13)\n"
             f"Price: {current_price:.2f}\n"
             f"Reason: {reason}\n"
             f"{pnl_line}"
