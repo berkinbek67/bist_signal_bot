@@ -17,6 +17,7 @@ import os
 import time
 import requests
 import pandas as pd
+from funding_rate import get_aggregated_funding_rate, score_funding_rate
 from datetime import datetime, timezone
 from config import (
     TELEGRAM_BOT_TOKEN,
@@ -104,8 +105,10 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def score_signal(df: pd.DataFrame) -> dict:
-    """Score six factors from -1/0/+1 each, then apply weights."""
+def score_signal(df: pd.DataFrame, funding_score: int | None = None) -> dict:
+    """Score seven factors from -1/0/+1 each, then apply weights.
+    funding_score is computed separately (it needs its own network calls
+    to exchange APIs, not just the price/volume dataframe)."""
     prev, curr = df.iloc[-2], df.iloc[-1]
     breakdown = {}
 
@@ -136,6 +139,9 @@ def score_signal(df: pd.DataFrame) -> dict:
         breakdown["Bollinger Bands"] = -1
     else:
         breakdown["Bollinger Bands"] = 0
+
+    if funding_score is not None:
+        breakdown["Funding Rate"] = funding_score
 
     raw_total = sum(breakdown.values())
     weighted_total = sum(val * INDICATOR_WEIGHTS[name] for name, val in breakdown.items())
@@ -264,7 +270,7 @@ def build_status_message(df: pd.DataFrame, result: dict, classification: str) ->
         f"Status for {COIN_ID}/{VS_CURRENCY}\n"
         f"Price: {curr['close']:.2f}\n"
         f"RSI: {curr['rsi']:.1f}\n"
-        f"Weighted score: {result['weighted_total']:+d}/9 -> {classification}\n"
+        f"Weighted score: {result['weighted_total']:+d}/11 -> {classification}\n"
         f"{breakdown_lines}\n"
         f"Time: {now}"
     )
@@ -304,7 +310,16 @@ def reply_to_pending_messages(status_text: str) -> None:
 def run_once() -> None:
     df = fetch_candles(COIN_ID, VS_CURRENCY, HISTORY_DAYS)
     df = compute_indicators(df)
-    result = score_signal(df)
+
+    funding_score = None
+    try:
+        funding_info = get_aggregated_funding_rate(COIN_ID)
+        funding_score = score_funding_rate(funding_info["aggregated_rate_pct"])
+        print(f"    funding rate: {funding_info}")
+    except Exception as e:
+        print(f"[!] Funding rate lookup skipped: {e}")
+
+    result = score_signal(df, funding_score=funding_score)
     classification = classify(result["weighted_total"])
 
     current_price = df.iloc[-1]["close"]
@@ -342,7 +357,7 @@ def run_once() -> None:
             )
         pnl_line = f"\nRealized P/L: {pnl_pct:+.2%}\n" if action == "SELL" else ""
         message = (
-            f"{action} on {label} ({classification}, weighted score {result['weighted_total']:+d}/9)\n"
+            f"{action} on {label} ({classification}, weighted score {result['weighted_total']:+d}/11)\n"
             f"Price: {current_price:.2f}\n"
             f"Reason: {reason}\n"
             f"{pnl_line}"
