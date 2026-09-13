@@ -30,21 +30,24 @@ VOLUME_AVG_PERIOD = 20
 
 # --- Weighted scoring ---
 # Trend/momentum indicators count more than short-term confirmation ones.
-# Max possible score = sum of all weights = 9. Min = -9.
+# Funding rate is genuinely independent information (leveraged trader
+# positioning, not derived from price/volume), so it's weighted like a
+# trend indicator. Max possible score = sum of all weights = 11. Min = -11.
 INDICATOR_WEIGHTS = {
     "EMA crossover": 2,
     "Trend (vs EMA200)": 2,
     "MACD": 2,
+    "Funding Rate": 2,
     "RSI": 1,
     "Volume": 1,
     "Bollinger Bands": 1,
 }
 
-# Thresholds on the WEIGHTED score (range -9 to +9)
-BUY_THRESHOLD = 4
-STRONG_BUY_THRESHOLD = 7
-SELL_THRESHOLD = -4
-STRONG_SELL_THRESHOLD = -7
+# Thresholds on the WEIGHTED score (range -11 to +11)
+BUY_THRESHOLD = 5
+STRONG_BUY_THRESHOLD = 9
+SELL_THRESHOLD = -5
+STRONG_SELL_THRESHOLD = -9
 
 # --- Spot trading behavior ---
 # This bot only ever does: BUY (enter), HOLD (do nothing), SELL (exit).
