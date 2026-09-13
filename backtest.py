@@ -5,13 +5,14 @@ Runs the EXACT same indicator/scoring/decision logic from main.py against
 historical data, walking forward candle by candle (no look-ahead -- each
 step only sees data up to that point, same as the live bot).
 
-Runs TWO versions to test the funding-rate addition in isolation:
-  1. WITHOUT funding rate (the original 6-factor system)
-  2. WITH funding rate (Binance-only historical rate, as an approximation
-     of the full 5-exchange OI-weighted version used live -- historical
-     open interest across all 5 exchanges isn't freely available)
+Tests each addition IN ISOLATION against the original 6-factor baseline,
+plus a combined "everything" run:
+  1. Baseline (6 factors: EMA crossover, EMA200 trend, RSI, MACD, Volume, BB)
+  2. + Funding rate only (Binance-only historical approximation)
+  3. + Supertrend only
+  4. + Both together (matches what's actually running live)
 
-Compares both against simple buy-and-hold over the same period.
+Compares all four against simple buy-and-hold over the same period.
 
 This does NOT place real trades. It simulates a hypothetical spot
 position using only past data at each step.
@@ -19,9 +20,10 @@ position using only past data at each step.
 
 import requests
 import pandas as pd
-from config import COIN_ID, VS_CURRENCY, FEE_RATE, MIN_PROFIT_MARGIN
+from config import COIN_ID, VS_CURRENCY, FEE_RATE, MIN_PROFIT_MARGIN, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER
 from main import compute_indicators, score_signal, classify, decide_action, compute_price_range
 from funding_rate import BASE_SYMBOL_MAP, score_funding_rate
+from supertrend import fetch_ohlc_binance, compute_supertrend, score_supertrend
 
 BACKTEST_DAYS = 90  # CoinGecko gives hourly granularity for 2-90 day ranges
 
@@ -50,7 +52,6 @@ def fetch_historical_funding(coin_id: str, days: int) -> pd.DataFrame:
 
     symbol = f"{base}USDT"
     url = "https://fapi.binance.com/fapi/v1/fundingRate"
-    # ~3 settlements/day, add buffer
     limit = min(1000, days * 3 + 20)
     response = requests.get(url, params={"symbol": symbol, "limit": limit}, timeout=15)
     response.raise_for_status()
@@ -62,38 +63,54 @@ def fetch_historical_funding(coin_id: str, days: int) -> pd.DataFrame:
     return df[["close_time", "rate_pct"]].sort_values("close_time")
 
 
-def attach_funding_scores(price_df: pd.DataFrame, funding_df: pd.DataFrame) -> pd.DataFrame:
-    """Attach the most recent known funding rate at each price timestamp
-    (merge_asof = only uses data available AT OR BEFORE that point, so
-    this does not leak future information)."""
-    df = pd.merge_asof(
+def fetch_historical_supertrend(coin_id: str) -> pd.DataFrame:
+    """
+    Binance spot hourly candles, capped at 1000 (~41 days) by Binance's
+    per-request limit. This means the Supertrend factor's backtest
+    coverage is SHORTER than the full 90-day window -- it'll simply have
+    no data (and be excluded, same as funding when unavailable) for the
+    earlier part of the period.
+    """
+    base = BASE_SYMBOL_MAP.get(coin_id)
+    if base is None:
+        raise ValueError(f"No ticker mapping for {coin_id}")
+    ohlc = fetch_ohlc_binance(base, interval="1h", limit=1000)
+    ohlc = compute_supertrend(ohlc, period=SUPERTREND_PERIOD, multiplier=SUPERTREND_MULTIPLIER)
+    ohlc["supertrend_score"] = ohlc["supertrend_trend"].apply(score_supertrend)
+    return ohlc[["close_time", "supertrend_score"]]
+
+
+def attach_scores(price_df: pd.DataFrame, extra_df: pd.DataFrame, score_col: str) -> pd.DataFrame:
+    """Attach the most recent known value at each price timestamp using
+    merge_asof (backward direction = only data available AT OR BEFORE
+    that point, so this never leaks future information)."""
+    return pd.merge_asof(
         price_df.sort_values("close_time"),
-        funding_df.sort_values("close_time"),
+        extra_df[["close_time", score_col]].sort_values("close_time"),
         on="close_time",
         direction="backward",
     )
-    df["funding_score"] = df["rate_pct"].apply(
-        lambda r: score_funding_rate(r) if pd.notna(r) else None
-    )
-    return df
 
 
-def run_simulation(df: pd.DataFrame, use_funding: bool) -> dict:
+def run_simulation(df: pd.DataFrame, use_funding: bool, use_supertrend: bool) -> dict:
     """Walk forward through the historical data, simulating the bot's
     exact decision logic at each step. Starts flat (not in position)."""
     state = {"in_position": False, "entry_price": None, "entry_time": None}
     trades = []
-
-    # Need at least EMA_TREND (200) candles of warm-up before indicators
-    # are meaningful, same constraint the live bot has.
-    start_index = 210
+    start_index = 210  # EMA200 warm-up, same constraint the live bot has
 
     for i in range(start_index, len(df)):
         window = df.iloc[: i + 1].copy()
         window = compute_indicators(window)
 
-        funding_score = df.iloc[i]["funding_score"] if use_funding else None
-        result = score_signal(window, funding_score=funding_score)
+        funding_score = df.iloc[i].get("funding_score") if use_funding else None
+        supertrend_score = df.iloc[i].get("supertrend_score") if use_supertrend else None
+        if pd.isna(funding_score):
+            funding_score = None
+        if pd.isna(supertrend_score):
+            supertrend_score = None
+
+        result = score_signal(window, funding_score=funding_score, supertrend_score=supertrend_score)
         classification = classify(result["weighted_total"])
 
         current_price = window.iloc[-1]["close"]
@@ -117,8 +134,6 @@ def run_simulation(df: pd.DataFrame, use_funding: bool) -> dict:
             })
             state = {"in_position": False, "entry_price": None, "entry_time": None}
 
-    # If still in a position at the end, close it at the last price so
-    # results are comparable (mark-to-market).
     if state["in_position"]:
         current_price = df.iloc[-1]["close"]
         pnl_pct = (current_price - state["entry_price"]) / state["entry_price"]
@@ -131,23 +146,21 @@ def run_simulation(df: pd.DataFrame, use_funding: bool) -> dict:
             "still_open": True,
         })
 
-    return summarize(trades, df)
+    return summarize(trades)
 
 
-def summarize(trades: list, df: pd.DataFrame) -> dict:
+def summarize(trades: list) -> dict:
     if not trades:
         return {
             "num_trades": 0, "win_rate": None, "total_return_pct": 0.0,
             "avg_win_pct": None, "avg_loss_pct": None, "trades": [],
         }
 
-    fee_cost = 2 * FEE_RATE  # round trip
+    fee_cost = 2 * FEE_RATE
     net_pnls = [t["pnl_pct"] - fee_cost for t in trades]
-
     wins = [p for p in net_pnls if p > 0]
     losses = [p for p in net_pnls if p <= 0]
 
-    # Compound the trades to get total strategy return over the period.
     total_return = 1.0
     for p in net_pnls:
         total_return *= (1 + p)
@@ -164,7 +177,7 @@ def summarize(trades: list, df: pd.DataFrame) -> dict:
 
 
 def buy_and_hold_return(df: pd.DataFrame) -> float:
-    start_price = df.iloc[210]["close"]  # same warm-up start point, fair comparison
+    start_price = df.iloc[210]["close"]
     end_price = df.iloc[-1]["close"]
     return (end_price - start_price) / start_price * 100
 
@@ -185,18 +198,27 @@ def print_report(label: str, result: dict) -> None:
 
 def main():
     print(f"Fetching {BACKTEST_DAYS} days of historical data for {COIN_ID}/{VS_CURRENCY}...")
-    price_df = fetch_historical_prices(COIN_ID, VS_CURRENCY, BACKTEST_DAYS)
+    df = fetch_historical_prices(COIN_ID, VS_CURRENCY, BACKTEST_DAYS)
 
     print("Fetching historical funding rate (Binance only, approximation)...")
+    funding_available = False
     try:
         funding_df = fetch_historical_funding(COIN_ID, BACKTEST_DAYS)
-        df = attach_funding_scores(price_df, funding_df)
+        df = attach_scores(df, funding_df.assign(funding_score=funding_df["rate_pct"].apply(score_funding_rate)), "funding_score")
         funding_available = True
     except Exception as e:
-        print(f"[!] Could not fetch funding history ({e}) -- running without it.")
-        df = price_df.copy()
+        print(f"[!] Could not fetch funding history ({e}) -- skipping that factor.")
         df["funding_score"] = None
-        funding_available = False
+
+    print("Fetching historical Supertrend data (Binance spot, capped at ~41 days)...")
+    supertrend_available = False
+    try:
+        supertrend_df = fetch_historical_supertrend(COIN_ID)
+        df = attach_scores(df, supertrend_df, "supertrend_score")
+        supertrend_available = True
+    except Exception as e:
+        print(f"[!] Could not fetch Supertrend history ({e}) -- skipping that factor.")
+        df["supertrend_score"] = None
 
     if len(df) <= 210:
         print("[!] Not enough historical data for a meaningful backtest (need 200+ candles warm-up).")
@@ -204,21 +226,23 @@ def main():
 
     bh_return = buy_and_hold_return(df)
 
-    result_without_funding = run_simulation(df, use_funding=False)
-    print_report("WITHOUT funding rate (6-factor system)", result_without_funding)
+    print_report("Baseline (6 factors)", run_simulation(df, use_funding=False, use_supertrend=False))
 
     if funding_available:
-        result_with_funding = run_simulation(df, use_funding=True)
-        print_report("WITH funding rate (7-factor system, Binance-only approx)", result_with_funding)
-    else:
-        print("\n=== WITH funding rate ===\nSkipped -- funding history unavailable this run.")
+        print_report("+ Funding rate only", run_simulation(df, use_funding=True, use_supertrend=False))
+    if supertrend_available:
+        print_report("+ Supertrend only", run_simulation(df, use_funding=False, use_supertrend=True))
+    if funding_available and supertrend_available:
+        print_report("+ Both (matches live bot)", run_simulation(df, use_funding=True, use_supertrend=True))
 
     print(f"\n=== Buy-and-hold (same period, for reference) ===")
     print(f"Return: {bh_return:+.2f}%")
 
     print("\nReminder: this is historical performance on one specific period and")
     print("one specific coin. It does not guarantee future results. Small trade")
-    print("counts especially should be treated as low-confidence.")
+    print("counts especially should be treated as low-confidence. The Supertrend")
+    print("results only cover the last ~41 days (Binance's per-request candle limit),")
+    print("shorter than the other tests -- not a fully apples-to-apples comparison.")
 
 
 if __name__ == "__main__":
