@@ -21,7 +21,7 @@ position using only past data at each step.
 import requests
 import pandas as pd
 from config import COIN_ID, VS_CURRENCY, FEE_RATE, MIN_PROFIT_MARGIN, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER
-from main import compute_indicators, score_signal, classify, decide_action, compute_price_range
+from main import compute_indicators, score_signal, classify, classify_trend_exit, decide_action, compute_price_range
 from funding_rate import BASE_SYMBOL_MAP, score_funding_rate
 from supertrend import fetch_ohlc_binance, compute_supertrend, score_supertrend
 
@@ -114,7 +114,8 @@ def run_simulation(df: pd.DataFrame, use_funding: bool, use_supertrend: bool) ->
         classification = classify(result["weighted_total"])
 
         current_price = window.iloc[-1]["close"]
-        action, reason = decide_action(classification, state, current_price)
+        trend_classification = classify_trend_exit(result["breakdown"])
+        action, reason = decide_action(classification, trend_classification, state, current_price)
 
         if action == "BUY":
             state = {
