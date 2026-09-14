@@ -232,6 +232,47 @@ def send_morning_summary(scanned: list[dict]) -> None:
     send_telegram_message("\n".join(lines))
 
 
+def fetch_daily_change(symbol: str) -> dict | None:
+    """Latest daily close vs the previous daily close, as a % change."""
+    try:
+        df = fetch_ohlc_yahoo(symbol, range_="5d", interval="1d")
+        if len(df) < 2:
+            return None
+        prev_close = df.iloc[-2]["close"]
+        latest_close = df.iloc[-1]["close"]
+        pct_change = (latest_close - prev_close) / prev_close * 100
+        return {"symbol": symbol, "prev_close": prev_close, "latest_close": latest_close, "pct_change": pct_change}
+    except Exception as e:
+        print(f"[!] {symbol}: daily change lookup failed ({e})")
+        return None
+
+
+def send_night_recap() -> None:
+    """A recap of the watchlist's daily moves, meant to run once overnight
+    (after the trading day has fully closed and settled)."""
+    changes = [c for c in (fetch_daily_change(s) for s in WATCHLIST) if c is not None]
+    if not changes:
+        print("[!] No daily change data available for night recap, skipping.")
+        return
+
+    ranked = sorted(changes, key=lambda c: c["pct_change"], reverse=True)
+    top_n = min(MORNING_SCAN_TOP_N, len(ranked))
+    gainers = ranked[:top_n]
+    losers = ranked[-top_n:][::-1]  # worst first
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    lines = ["Yesterday's watchlist recap", "", "Top gainers:"]
+    for c in gainers:
+        lines.append(f"  {c['symbol']}: {c['pct_change']:+.2f}% ({c['prev_close']:.2f} -> {c['latest_close']:.2f})")
+    lines.append("")
+    lines.append("Top losers:")
+    for c in losers:
+        lines.append(f"  {c['symbol']}: {c['pct_change']:+.2f}% ({c['prev_close']:.2f} -> {c['latest_close']:.2f})")
+    lines.append(f"\nTime: {now}")
+
+    send_telegram_message("\n".join(lines))
+
+
 def run_once() -> None:
     now_istanbul = datetime.now(ISTANBUL_TZ)
 
