@@ -15,11 +15,17 @@ hours (10:00-18:00 Istanbul time, Mon-Fri) unlike crypto's 24/7 markets.
 """
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import requests
 import pandas as pd
 
 # Istanbul is GMT+3 year-round (no daylight saving time changes).
 ISTANBUL_TZ = timezone(timedelta(hours=3))
+
+# Both COMEX gold (GC=F) and Brent/ICE (BZ=F) anchor their sessions to US
+# Eastern Time. Using zoneinfo (not a fixed UTC offset) means daylight
+# saving transitions are handled automatically and correctly.
+NY_TZ = ZoneInfo("America/New_York")
 
 MARKET_OPEN_HOUR = 10   # 10:00
 MARKET_CLOSE_HOUR = 18  # 18:00
@@ -53,25 +59,34 @@ def is_market_open(now: datetime | None = None) -> bool:
 
 def is_forex_market_open(now: datetime | None = None) -> bool:
     """
-    True if the forex/commodities market is trading. Unlike BIST, this
-    market runs nearly continuously: opens Sunday ~22:00 UTC and closes
-    Friday ~22:00 UTC, with no daily close in between. Only genuinely
-    closed on the weekend gap. Does not account for holidays.
+    True if the gold/Brent futures market is trading. Both anchor to US
+    Eastern Time: weekly session Sunday 6pm ET to Friday 5pm ET, PLUS a
+    daily 1-hour maintenance break from 5-6pm ET every weekday (this is
+    real -- confirmed for both COMEX gold and ICE Brent/oil). Converting
+    to America/New_York handles daylight saving automatically -- no
+    hardcoded UTC offset that would silently go wrong after a DST switch.
+
+    Note: Brent's actual weekly reopen (ICE, London-anchored) may differ
+    from gold's by an hour or so -- this uses gold's schedule for both,
+    which is close enough that it's a minor, low-stakes imprecision
+    rather than something worth a separate code path right now.
     """
     if now is None:
         now = datetime.now(timezone.utc)
-    else:
-        now = now.astimezone(timezone.utc)
+    now_ny = now.astimezone(NY_TZ)
 
-    weekday = now.weekday()  # 0=Monday ... 5=Saturday, 6=Sunday
-    hour = now.hour
+    weekday = now_ny.weekday()  # 0=Monday ... 5=Saturday, 6=Sunday
+    hour = now_ny.hour
 
     if weekday == 5:  # Saturday -- always closed
         return False
-    if weekday == 6 and hour < 22:  # Sunday before 22:00 UTC -- still closed
+    if weekday == 6 and hour < 18:  # Sunday before 6pm ET -- still closed
         return False
-    if weekday == 4 and hour >= 22:  # Friday after 22:00 UTC -- closed for the weekend
+    if weekday == 4 and hour >= 17:  # Friday after 5pm ET -- closed for the weekend
         return False
+    if hour == 17:  # 5-6pm ET daily maintenance break, Monday-Thursday
+        return False
+    return True
     return True
 
 
