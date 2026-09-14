@@ -288,6 +288,13 @@ CLASSIFICATION_TR = {
 }
 
 
+def format_eu_number(value: float, decimals: int = 4) -> str:
+    """European/Turkish number style: period for thousands, comma for
+    decimals -- e.g. 3758.1713 becomes '3.758,1713'."""
+    raw = f"{value:,.{decimals}f}"  # e.g. '3,758.1713' (US style)
+    return raw.replace(",", "TEMP").replace(".", ",").replace("TEMP", ".")
+
+
 def build_buy_alert_message(symbol: str, entry: dict, price_range: dict, now: datetime) -> str:
     display_name = DISPLAY_NAMES.get(symbol, symbol)
     label_tr = CLASSIFICATION_TR.get(entry["classification"], entry["classification"])
@@ -299,9 +306,9 @@ def build_buy_alert_message(symbol: str, entry: dict, price_range: dict, now: da
         f"  {display_name} · {label_tr}\n"
         f"━━━━━━━━━━━━━\n"
         f"Skor       {entry['result']['weighted_total']:+d}/{max_score}\n"
-        f"Giriş      {price_range['entry']:.4f}\n"
-        f"Hedef      {price_range['target']:.4f}\n"
-        f"Stop       {price_range['invalidation']:.4f}\n"
+        f"Giriş      {format_eu_number(price_range['entry'])}\n"
+        f"Hedef      {format_eu_number(price_range['target'])}\n"
+        f"Stop       {format_eu_number(price_range['invalidation'])}\n"
         f"Saat       {now_str}\n"
         f"━━━━━━━━━━━━━"
     )
