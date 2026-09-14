@@ -8,14 +8,19 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # --- Market settings (Forex/Commodities via Yahoo Finance) ---
-# Only 3 instruments now: Brent Crude, Gold/USD, Gold/EUR (computed as a
-# cross rate since Yahoo has no direct XAUEUR ticker).
-WATCHLIST = ["BZ=F", "XAUUSD=X", "XAUEUR"]
+# Only 3 instruments now: Brent Crude, Gold futures (COMEX), Gold/EUR
+# (computed as a cross rate). Note: XAUUSD=X does NOT work on Yahoo's
+# actual data API (confirmed via a live 404) despite appearing to exist
+# as a quote page -- GC=F (Gold futures) is the real, working ticker.
+# Like BZ=F, GC=F is a regulated futures contract, so it carries its own
+# "COMEX - Delayed Quote" delay, similar to how BIST stocks were delayed
+# -- this is NOT the fresher near-real-time data true spot forex has.
+WATCHLIST = ["BZ=F", "GC=F", "XAUEUR"]
 
 # XAUEUR isn't a real Yahoo ticker -- when scanning it, fetch these two
 # instead and divide (see fetch_ohlc_cross in bist_data.py).
 CROSS_RATE_PAIRS = {
-    "XAUEUR": ("XAUUSD=X", "EURUSD=X"),
+    "XAUEUR": ("GC=F", "EURUSD=X"),
 }
 
 OHLC_RANGE = "1mo"    # how far back to fetch (needs 200+ candles for EMA200)
