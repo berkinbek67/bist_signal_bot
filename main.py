@@ -23,17 +23,15 @@ import time
 import requests
 import pandas as pd
 from datetime import datetime, timezone
-from bist_data import fetch_ohlc_yahoo, is_market_open, ISTANBUL_TZ
+from bist_data import fetch_ohlc_yahoo, fetch_ohlc_cross, is_forex_market_open
 from supertrend import compute_supertrend, score_supertrend
 from config import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     WATCHLIST,
+    CROSS_RATE_PAIRS,
     OHLC_RANGE,
     OHLC_INTERVAL,
-    MORNING_SCAN_HOUR,
-    MORNING_SCAN_MINUTE_WINDOW,
-    MORNING_SCAN_TOP_N,
     EMA_FAST,
     EMA_SLOW,
     EMA_TREND,
@@ -192,10 +190,16 @@ def reply_to_pending_messages(status_text: str) -> None:
 # ---------- Core scan ----------
 
 def scan_ticker(symbol: str) -> dict | None:
-    """Fetch, score, and classify one ticker. Returns None if data for
-    this symbol couldn't be fetched (skipped, not a hard failure)."""
+    """Fetch, score, and classify one ticker. Handles both regular Yahoo
+    tickers and computed cross-rate symbols (e.g. XAUEUR). Returns None
+    if data couldn't be fetched (skipped, not a hard failure)."""
     try:
-        df = fetch_ohlc_yahoo(symbol, range_=OHLC_RANGE, interval=OHLC_INTERVAL)
+        if symbol in CROSS_RATE_PAIRS:
+            base_ticker, quote_ticker = CROSS_RATE_PAIRS[symbol]
+            df = fetch_ohlc_cross(base_ticker, quote_ticker, range_=OHLC_RANGE, interval=OHLC_INTERVAL)
+        else:
+            df = fetch_ohlc_yahoo(symbol, range_=OHLC_RANGE, interval=OHLC_INTERVAL)
+
         if len(df) < 210:
             print(f"[!] {symbol}: not enough candles yet ({len(df)}), skipping")
             return None
@@ -215,11 +219,6 @@ def scan_ticker(symbol: str) -> dict | None:
         return None
 
 
-def is_morning_scan_window(now_istanbul: datetime) -> bool:
-    start_min, end_min = MORNING_SCAN_MINUTE_WINDOW
-    return now_istanbul.hour == MORNING_SCAN_HOUR and start_min <= now_istanbul.minute <= end_min
-
-
 def send_morning_summary(scanned: list[dict]) -> None:
     ranked = sorted(scanned, key=lambda s: s["result"]["weighted_total"], reverse=True)
     top = ranked[:MORNING_SCAN_TOP_N]
@@ -233,9 +232,15 @@ def send_morning_summary(scanned: list[dict]) -> None:
 
 
 def fetch_daily_change(symbol: str) -> dict | None:
-    """Latest daily close vs the previous daily close, as a % change."""
+    """Latest daily close vs the previous daily close, as a % change.
+    Handles both regular tickers and computed cross-rate symbols."""
     try:
-        df = fetch_ohlc_yahoo(symbol, range_="5d", interval="1d")
+        if symbol in CROSS_RATE_PAIRS:
+            base_ticker, quote_ticker = CROSS_RATE_PAIRS[symbol]
+            df = fetch_ohlc_cross(base_ticker, quote_ticker, range_="5d", interval="1d")
+        else:
+            df = fetch_ohlc_yahoo(symbol, range_="5d", interval="1d")
+
         if len(df) < 2:
             return None
         prev_close = df.iloc[-2]["close"]
@@ -249,24 +254,20 @@ def fetch_daily_change(symbol: str) -> dict | None:
 
 def send_night_recap() -> None:
     """A recap of the watchlist's daily moves, meant to run once overnight
-    (after the trading day has fully closed and settled)."""
+    (after the trading day has fully closed and settled). With a small
+    watchlist, this just lists everything sorted by change -- no
+    separate gainers/losers split, since that would just repeat the same
+    handful of items twice."""
     changes = [c for c in (fetch_daily_change(s) for s in WATCHLIST) if c is not None]
     if not changes:
         print("[!] No daily change data available for night recap, skipping.")
         return
 
     ranked = sorted(changes, key=lambda c: c["pct_change"], reverse=True)
-    top_n = min(MORNING_SCAN_TOP_N, len(ranked))
-    gainers = ranked[:top_n]
-    losers = ranked[-top_n:][::-1]  # worst first
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    lines = ["Yesterday's watchlist recap", "", "Top gainers:"]
-    for c in gainers:
-        lines.append(f"  {c['symbol']}: {c['pct_change']:+.2f}% ({c['prev_close']:.2f} -> {c['latest_close']:.2f})")
-    lines.append("")
-    lines.append("Top losers:")
-    for c in losers:
+    lines = ["Yesterday's recap", ""]
+    for c in ranked:
         lines.append(f"  {c['symbol']}: {c['pct_change']:+.2f}% ({c['prev_close']:.2f} -> {c['latest_close']:.2f})")
     lines.append(f"\nTime: {now}")
 
@@ -274,13 +275,13 @@ def send_night_recap() -> None:
 
 
 def run_once() -> None:
-    now_istanbul = datetime.now(ISTANBUL_TZ)
+    now = datetime.now(timezone.utc)
 
-    if not is_market_open(now_istanbul):
-        print(f"[{now_istanbul}] BIST closed, skipping.")
+    if not is_forex_market_open(now):
+        print(f"[{now}] Market closed (weekend), skipping.")
         return
 
-    print(f"[{now_istanbul}] BIST open, scanning {len(WATCHLIST)} tickers...")
+    print(f"[{now}] Market open, scanning {len(WATCHLIST)} instruments...")
 
     scanned = []
     for symbol in WATCHLIST:
@@ -289,31 +290,28 @@ def run_once() -> None:
             continue
         scanned.append(entry)
 
-        print(f"    {symbol}: price={entry['price']:.2f} score={entry['result']['weighted_total']} "
+        print(f"    {symbol}: price={entry['price']:.4f} score={entry['result']['weighted_total']} "
               f"classification={entry['classification']}")
 
         if entry["classification"] in ("BUY", "STRONG BUY"):
             price_range = compute_price_range(entry["df"])
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            now_str = now.strftime("%Y-%m-%d %H:%M:%S UTC")
             message = (
                 f"{entry['classification']} on {symbol} (weighted score {entry['result']['weighted_total']:+d})\n"
-                f"Price: {entry['price']:.2f}\n\n"
-                f"Entry: {price_range['entry']:.2f}\n"
-                f"Target (sell here): {price_range['target']:.2f}\n"
-                f"Invalidation (stop): {price_range['invalidation']:.2f}\n\n"
-                f"Time: {now}"
+                f"Price: {entry['price']:.4f}\n\n"
+                f"Entry: {price_range['entry']:.4f}\n"
+                f"Target (sell here): {price_range['target']:.4f}\n"
+                f"Invalidation (stop): {price_range['invalidation']:.4f}\n\n"
+                f"Time: {now_str}"
             )
             send_telegram_message(message)
 
-    if is_morning_scan_window(now_istanbul) and scanned:
-        send_morning_summary(scanned)
-
     if scanned:
-        reply_to_pending_messages(f"Last scan covered {len(scanned)}/{len(WATCHLIST)} tickers.")
+        reply_to_pending_messages(f"Last scan covered {len(scanned)}/{len(WATCHLIST)} instruments.")
 
 
 def main() -> None:
-    print(f"Starting BIST signal bot for {len(WATCHLIST)} tickers.")
+    print(f"Starting signal bot for {len(WATCHLIST)} instruments.")
     while True:
         try:
             run_once()
