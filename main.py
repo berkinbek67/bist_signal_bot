@@ -278,7 +278,7 @@ def send_night_recap() -> None:
 
 DISPLAY_NAMES = {
     "BZ=F": "BRENT",
-    "XAUUSD=X": "XAUUSD",
+    "GC=F": "XAUUSD",
     "XAUEUR": "XAUEUR",
 }
 
