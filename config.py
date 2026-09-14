@@ -70,6 +70,10 @@ INDICATOR_WEIGHTS = {
 BUY_THRESHOLD = 2
 STRONG_BUY_THRESHOLD = 5
 
+# Mirrors of the BUY thresholds, for short signals.
+SELL_THRESHOLD = -2
+STRONG_SELL_THRESHOLD = -5
+
 # --- Trading cost assumptions ---
 # IMPORTANT: Turkish brokerage commissions vary a lot by broker (often a
 # small % commission plus BSMV tax on that commission) -- these are
