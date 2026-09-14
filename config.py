@@ -7,10 +7,22 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# --- Market settings (CoinGecko) ---
-COIN_ID = "bitcoin"       # CoinGecko coin id, e.g. bitcoin, ethereum, solana
-VS_CURRENCY = "usd"       # currency to price against
-HISTORY_DAYS = 1          # how much history to pull each check (1 = ~5min granularity)
+# --- Market settings (BIST via Yahoo Finance) ---
+# Watchlist of tickers to scan every check. Uses Yahoo's ".IS" suffix.
+# Starter list is BIST_30_WATCHLIST from bist_data.py -- edit freely.
+from bist_data import BIST_30_WATCHLIST
+WATCHLIST = BIST_30_WATCHLIST
+
+OHLC_RANGE = "1mo"    # how far back to fetch (needs 200+ candles for EMA200)
+OHLC_INTERVAL = "15m" # candle size
+
+# --- Morning scan ---
+# Sends a single ranked "top N" message once per day, in this specific
+# time window (Istanbul time). No position/state tracking needed -- this
+# just checks "is it currently within this window" on every run.
+MORNING_SCAN_HOUR = 10
+MORNING_SCAN_MINUTE_WINDOW = (15, 29)  # fires once, in this 15-min window
+MORNING_SCAN_TOP_N = 5
 
 # --- Indicator settings ---
 EMA_FAST = 9
@@ -29,70 +41,40 @@ BB_STD_DEV = 2
 VOLUME_AVG_PERIOD = 20
 
 # --- Weighted scoring ---
-# Trend/momentum indicators count more than short-term confirmation ones.
-# Funding rate and Supertrend are genuinely independent information
-# (leveraged trader positioning, and a well-established ATR trend model)
-# rather than more of the same price-derived math, so both are weighted
-# like trend indicators. Max possible score = sum of all weights = 13.
+# Funding Rate dropped -- it's a crypto perpetual-futures concept with no
+# equivalent for stocks. Max possible score = sum of weights = 11.
 INDICATOR_WEIGHTS = {
     "EMA crossover": 2,
     "Trend (vs EMA200)": 2,
     "MACD": 2,
-    "Funding Rate": 2,
     "Supertrend": 2,
     "RSI": 1,
     "Volume": 1,
     "Bollinger Bands": 1,
 }
 
-# Thresholds on the WEIGHTED score (range -13 to +13)
-BUY_THRESHOLD = 6
-STRONG_BUY_THRESHOLD = 10
-SELL_THRESHOLD = -6
-STRONG_SELL_THRESHOLD = -10
+# --- Signal frequency ---
+# Scaled down proportionally from the crypto version's thresholds to
+# match the new max score of 11 (was 13). Still on the loose/frequent
+# side by design -- revisit once you've seen real BIST signal volume.
+BUY_THRESHOLD = 2
+STRONG_BUY_THRESHOLD = 5
 
-# --- Exit-only trend filter ---
-# SELL decisions look ONLY at these factors (not the full composite), so
-# short-term noise (RSI, Volume, Bollinger Bands, Funding) can't shake you
-# out of a position while the actual trend is still intact. Max possible
-# score here = 2+2+2+2 = 8 (each weighted at 2, matching INDICATOR_WEIGHTS).
-TREND_EXIT_FACTORS = ["EMA crossover", "Trend (vs EMA200)", "MACD", "Supertrend"]
-TREND_SELL_THRESHOLD = -4
-TREND_STRONG_SELL_THRESHOLD = -6
-
-# Supertrend parameters (from the original Pine Script defaults)
-SUPERTREND_PERIOD = 10
-SUPERTREND_MULTIPLIER = 3.0
-
-# --- Spot trading behavior ---
-# This bot only ever does: BUY (enter), HOLD (do nothing), SELL (exit).
-# It never opens a short position.
-
-# Trading cost assumptions (make these match your actual exchange).
-# FEE_RATE is per trade (one side). A round trip (buy + sell) costs 2x this.
-FEE_RATE = 0.001          # 0.1% per trade, adjust to your exchange's real fee
-MIN_PROFIT_MARGIN = 0.002 # extra buffer required above pure fee breakeven
-
-# A STRONG SELL always exits regardless of the fee filter (treated as a
-# risk-cutting signal, not a profit-taking one). A regular SELL only exits
-# if the position is far enough in profit (or loss) to clear costs.
-ALLOW_STRONG_SELL_OVERRIDE = True
-
-# Where position state (are we currently holding, at what entry price) is
-# stored between runs, since each GitHub Actions run starts fresh.
-STATE_FILE = "state.json"
+# --- Trading cost assumptions ---
+# IMPORTANT: Turkish brokerage commissions vary a lot by broker (often a
+# small % commission plus BSMV tax on that commission) -- these are
+# placeholder values. Replace with your actual broker's real numbers
+# before trusting the fee-vs-target math.
+FEE_RATE = 0.0015         # placeholder -- confirm your broker's real commission
+MIN_PROFIT_MARGIN = 0.002 # extra buffer above pure fee breakeven
 
 # --- Reference price levels (target / invalidation) ---
 # Calculated as distances from entry using current volatility (Bollinger
-# Band width), NOT as absolute band levels -- this guarantees target is
-# always on the favorable side and invalidation always on the adverse
-# side, regardless of where price currently sits relative to the bands.
-TARGET_BAND_FRACTION = 0.75
-STOP_BAND_FRACTION = 0.25
-
-# --- Notifications ---
-# If True, sends a status message on every check even with no trade action.
-ALWAYS_NOTIFY = False
+# Band width). Carried over from the crypto version -- BIST stocks have
+# different volatility characteristics, so these likely need re-tuning
+# once you've seen real data (this is flagged as a to-do, not done yet).
+TARGET_BAND_FRACTION = 0.25
+STOP_BAND_FRACTION = 0.15
 
 # --- Local loop mode (only used if you run main.py continuously yourself) ---
 CHECK_INTERVAL_SECONDS = 60
