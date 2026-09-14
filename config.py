@@ -23,8 +23,8 @@ CROSS_RATE_PAIRS = {
     "XAUEUR": ("GC=F", "EURUSD=X"),
 }
 
-OHLC_RANGE = "1mo"    # how far back to fetch (needs 200+ candles for EMA200)
-OHLC_INTERVAL = "15m" # candle size
+OHLC_RANGE = "5d"    # Yahoo only keeps 1-minute data for the last 7 days -- 5d stays safely inside that limit
+OHLC_INTERVAL = "1m" # candle size -- now on a 1-minute timeframe as requested
 
 # --- Morning scan ---
 # Sends a single ranked "top N" message once per day, in this specific
