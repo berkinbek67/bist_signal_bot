@@ -1,31 +1,39 @@
 """
-Crypto Signal Bot (Spot trading version)
-------------------------------------------
-Pulls price + volume history from CoinGecko, scores six weighted
-indicators, and decides BUY (enter spot) / HOLD (do nothing) /
-SELL (exit spot) -- never a short position.
+BIST Signal Bot
+----------------
+Scans a watchlist of Borsa Istanbul stocks (via Yahoo Finance), scores
+each on 7 weighted indicators, and:
+  - Sends an individual BUY alert (with Entry/Target/Invalidation) for
+    any stock whose score crosses the threshold, any time during market
+    hours.
+  - Sends one ranked "Top N" summary message shortly after market open.
 
-Position state (are we currently holding, at what price) is stored in
-a small JSON file so decisions are consistent across separate runs.
+Only runs during BIST's regular session (10:00-18:00 Istanbul time,
+Mon-Fri) -- outside those hours, it does nothing.
 
-This does NOT place real trades on any exchange. It only sends alerts
-and tracks a hypothetical position so it can reason about entries/exits.
+This does NOT track a position or send active SELL alerts -- you place
+your own limit sell order at the Target price (and optionally a stop at
+Invalidation) manually on your broker's platform. Every check is fully
+independent; there is no state carried between runs.
+
+This does NOT place real trades. It only sends alerts.
 """
 
-import json
-import os
 import time
 import requests
 import pandas as pd
-from funding_rate import get_aggregated_funding_rate, score_funding_rate
-from supertrend import fetch_ohlc, compute_supertrend, score_supertrend
 from datetime import datetime, timezone
+from bist_data import fetch_ohlc_yahoo, is_market_open, ISTANBUL_TZ
+from supertrend import compute_supertrend, score_supertrend
 from config import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
-    COIN_ID,
-    VS_CURRENCY,
-    HISTORY_DAYS,
+    WATCHLIST,
+    OHLC_RANGE,
+    OHLC_INTERVAL,
+    MORNING_SCAN_HOUR,
+    MORNING_SCAN_MINUTE_WINDOW,
+    MORNING_SCAN_TOP_N,
     EMA_FAST,
     EMA_SLOW,
     EMA_TREND,
@@ -39,46 +47,19 @@ from config import (
     INDICATOR_WEIGHTS,
     BUY_THRESHOLD,
     STRONG_BUY_THRESHOLD,
-    SELL_THRESHOLD,
-    STRONG_SELL_THRESHOLD,
-    FEE_RATE,
-    MIN_PROFIT_MARGIN,
-    ALLOW_STRONG_SELL_OVERRIDE,
-    TREND_EXIT_FACTORS,
-    TREND_SELL_THRESHOLD,
-    TREND_STRONG_SELL_THRESHOLD,
-    STATE_FILE,
     TARGET_BAND_FRACTION,
     STOP_BAND_FRACTION,
-    ALWAYS_NOTIFY,
     CHECK_INTERVAL_SECONDS,
 )
 
-COINGECKO_URL_TEMPLATE = "https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
 
-
-# ---------- Data + indicators ----------
-
-def fetch_candles(coin_id: str, vs_currency: str, days: int = 1) -> pd.DataFrame:
-    """Fetch recent price + volume history from CoinGecko (no API key needed)."""
-    url = COINGECKO_URL_TEMPLATE.format(coin_id=coin_id)
-    params = {"vs_currency": vs_currency, "days": days}
-    response = requests.get(url, params=params, timeout=10)
-    response.raise_for_status()
-    raw = response.json()
-
-    prices = raw["prices"]
-    volumes = raw["total_volumes"]
-
-    df = pd.DataFrame(prices, columns=["timestamp", "close"])
-    df["volume"] = [v[1] for v in volumes]
-    df["close_time"] = pd.to_datetime(df["timestamp"], unit="ms")
-    return df[["close_time", "close", "volume"]]
-
+# ---------- Indicators ----------
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Add every indicator the scoring system needs. Only uses data up to
-    the current row -- no future information leaks in (no look-ahead)."""
+    """Add every indicator the scoring system needs, including Supertrend
+    (Yahoo gives us high/low/close together, so no separate fetch needed
+    like the crypto version required). Only uses data up to the current
+    row -- no future information leaks in (no look-ahead)."""
     df = df.copy()
 
     df["ema_fast"] = df["close"].ewm(span=EMA_FAST, adjust=False).mean()
@@ -106,15 +87,13 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     df["volume_avg"] = df["volume"].rolling(VOLUME_AVG_PERIOD).mean()
 
+    df = compute_supertrend(df)
+
     return df
 
 
-def score_signal(df: pd.DataFrame, funding_score: int | None = None,
-                  supertrend_score: int | None = None) -> dict:
-    """Score up to eight factors from -1/0/+1 each, then apply weights.
-    funding_score and supertrend_score are computed separately since they
-    need their own data sources (exchange APIs / OHLC candles), not just
-    the price/volume dataframe."""
+def score_signal(df: pd.DataFrame) -> dict:
+    """Score seven factors from -1/0/+1 each, then apply weights."""
     prev, curr = df.iloc[-2], df.iloc[-1]
     breakdown = {}
 
@@ -146,11 +125,7 @@ def score_signal(df: pd.DataFrame, funding_score: int | None = None,
     else:
         breakdown["Bollinger Bands"] = 0
 
-    if funding_score is not None:
-        breakdown["Funding Rate"] = funding_score
-
-    if supertrend_score is not None:
-        breakdown["Supertrend"] = supertrend_score
+    breakdown["Supertrend"] = score_supertrend(curr["supertrend_trend"])
 
     raw_total = sum(breakdown.values())
     weighted_total = sum(val * INDICATOR_WEIGHTS[name] for name, val in breakdown.items())
@@ -159,124 +134,22 @@ def score_signal(df: pd.DataFrame, funding_score: int | None = None,
 
 
 def classify(weighted_score: int) -> str:
-    """Turn the weighted score into a label. Range is -9 to +9."""
     if weighted_score >= STRONG_BUY_THRESHOLD:
         return "STRONG BUY"
     if weighted_score >= BUY_THRESHOLD:
         return "BUY"
-    if weighted_score <= STRONG_SELL_THRESHOLD:
-        return "STRONG SELL"
-    if weighted_score <= SELL_THRESHOLD:
-        return "SELL"
-    return "HOLD"
+    return "NO SIGNAL"
 
 
-# ---------- Position state (persists across runs via state.json) ----------
-
-def load_state() -> dict:
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE) as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {"in_position": False, "entry_price": None, "entry_time": None}
-
-
-def save_state(state: dict) -> None:
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
-
-
-def classify_trend_exit(breakdown: dict) -> str:
-    """
-    Exit decisions look ONLY at the trend/momentum block (EMA crossover,
-    EMA200 trend, MACD, Supertrend) -- not the full composite. This
-    prevents short-term noise (RSI, Volume, Bollinger Bands, Funding)
-    from shaking you out of a position while the actual trend is intact.
-    Entries still use the full composite; only exits are narrowed.
-    """
-    trend_score = sum(
-        breakdown[name] * INDICATOR_WEIGHTS[name]
-        for name in TREND_EXIT_FACTORS
-        if name in breakdown
-    )
-    if trend_score <= TREND_STRONG_SELL_THRESHOLD:
-        return "STRONG SELL"
-    if trend_score <= TREND_SELL_THRESHOLD:
-        return "SELL"
-    return "HOLD"
-
-
-def decide_action(classification: str, trend_classification: str, state: dict,
-                   current_price: float) -> tuple[str, str]:
-    """
-    Decide the actual action given the position state. Entries use the
-    full composite classification (all factors). Exits use ONLY the
-    trend-block classification, so a solid trend isn't undermined by
-    noisy short-term indicators.
-
-    Returns (action, reason) where action is one of BUY / SELL / HOLD.
-    """
-    in_position = state.get("in_position", False)
-
-    if not in_position:
-        if classification in ("BUY", "STRONG BUY"):
-            return "BUY", "Entering spot position"
-        return "HOLD", "Not in position, no buy signal"
-
-    # We ARE in position -- only ever consider exiting, never shorting.
-    if trend_classification in ("SELL", "STRONG SELL"):
-        entry_price = state.get("entry_price")
-        if entry_price is None:
-            return "SELL", "In position with no recorded entry price -- exiting to be safe"
-
-        pnl_pct = (current_price - entry_price) / entry_price
-        round_trip_cost = 2 * FEE_RATE + MIN_PROFIT_MARGIN
-
-        if trend_classification == "STRONG SELL" and ALLOW_STRONG_SELL_OVERRIDE:
-            return "SELL", f"Trend turned strongly bearish, overrides fee filter (P/L {pnl_pct:+.2%})"
-
-        if abs(pnl_pct) >= round_trip_cost:
-            return "SELL", f"Trend turned bearish and move clears trading costs (P/L {pnl_pct:+.2%} vs {round_trip_cost:.2%} threshold)"
-
-        return "HOLD", f"Trend turned bearish but move too weak to clear fees (P/L {pnl_pct:+.2%} vs {round_trip_cost:.2%} threshold)"
-
-    return "HOLD", "In position, trend still intact"
-
-
-# ---------- Reference price levels ----------
-
-def compute_price_range(df: pd.DataFrame, action: str) -> dict | None:
-    """
-    Suggest entry/target/invalidation levels as DISTANCES from the current
-    price, scaled by current volatility (Bollinger Band width). This is a
-    reference level based on current volatility, NOT a prediction.
-
-    Using distances (rather than raw bb_upper/bb_lower values) guarantees
-    target is always on the favorable side of entry and invalidation
-    always on the adverse side -- fixing the ordering bug where an
-    absolute band level could end up on the wrong side of entry.
-    """
-    if action not in ("BUY", "SELL"):
-        return None
-
+def compute_price_range(df: pd.DataFrame) -> dict:
     curr = df.iloc[-1]
     price = curr["close"]
     band_width = curr["bb_upper"] - curr["bb_lower"]
-
-    if action == "BUY":
-        return {
-            "entry": price,
-            "target": price + TARGET_BAND_FRACTION * band_width,
-            "invalidation": price - STOP_BAND_FRACTION * band_width,
-        }
-    else:  # SELL (exit)
-        return {
-            "entry": price,
-            "target": price - TARGET_BAND_FRACTION * band_width,
-            "invalidation": price + STOP_BAND_FRACTION * band_width,
-        }
+    return {
+        "entry": price,
+        "target": price + TARGET_BAND_FRACTION * band_width,
+        "invalidation": price - STOP_BAND_FRACTION * band_width,
+    }
 
 
 # ---------- Telegram ----------
@@ -289,26 +162,7 @@ def send_telegram_message(text: str) -> None:
         print(f"[!] Telegram send failed: {response.status_code} {response.text}")
 
 
-def build_status_message(df: pd.DataFrame, result: dict, classification: str) -> str:
-    curr = df.iloc[-1]
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    breakdown_lines = "\n".join(
-        f"  {name}: {'+' if val > 0 else ''}{val} (weight {INDICATOR_WEIGHTS[name]})"
-        for name, val in result["breakdown"].items()
-    )
-    return (
-        f"Status for {COIN_ID}/{VS_CURRENCY}\n"
-        f"Price: {curr['close']:.2f}\n"
-        f"RSI: {curr['rsi']:.1f}\n"
-        f"Weighted score: {result['weighted_total']:+d}/13 -> {classification}\n"
-        f"{breakdown_lines}\n"
-        f"Time: {now}"
-    )
-
-
 def reply_to_pending_messages(status_text: str) -> None:
-    """Reply once if you've texted the bot since the last run. Uses
-    Telegram's own offset tracking, so no extra storage is needed."""
     base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
     try:
         response = requests.get(f"{base_url}/getUpdates", timeout=10)
@@ -335,83 +189,90 @@ def reply_to_pending_messages(status_text: str) -> None:
         print(f"[!] Could not acknowledge messages: {e}")
 
 
-# ---------- Main loop ----------
+# ---------- Core scan ----------
+
+def scan_ticker(symbol: str) -> dict | None:
+    """Fetch, score, and classify one ticker. Returns None if data for
+    this symbol couldn't be fetched (skipped, not a hard failure)."""
+    try:
+        df = fetch_ohlc_yahoo(symbol, range_=OHLC_RANGE, interval=OHLC_INTERVAL)
+        if len(df) < 210:
+            print(f"[!] {symbol}: not enough candles yet ({len(df)}), skipping")
+            return None
+        df = compute_indicators(df)
+        result = score_signal(df)
+        classification = classify(result["weighted_total"])
+        current_price = df.iloc[-1]["close"]
+        return {
+            "symbol": symbol,
+            "price": current_price,
+            "result": result,
+            "classification": classification,
+            "df": df,
+        }
+    except Exception as e:
+        print(f"[!] {symbol}: scan failed ({e})")
+        return None
+
+
+def is_morning_scan_window(now_istanbul: datetime) -> bool:
+    start_min, end_min = MORNING_SCAN_MINUTE_WINDOW
+    return now_istanbul.hour == MORNING_SCAN_HOUR and start_min <= now_istanbul.minute <= end_min
+
+
+def send_morning_summary(scanned: list[dict]) -> None:
+    ranked = sorted(scanned, key=lambda s: s["result"]["weighted_total"], reverse=True)
+    top = ranked[:MORNING_SCAN_TOP_N]
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    lines = [f"Top {len(top)} by score this morning:"]
+    for s in top:
+        lines.append(f"  {s['symbol']}: {s['result']['weighted_total']:+d} ({s['classification']}) @ {s['price']:.2f}")
+    lines.append(f"\nTime: {now}")
+    send_telegram_message("\n".join(lines))
+
 
 def run_once() -> None:
-    df = fetch_candles(COIN_ID, VS_CURRENCY, HISTORY_DAYS)
-    df = compute_indicators(df)
+    now_istanbul = datetime.now(ISTANBUL_TZ)
 
-    funding_score = None
-    try:
-        funding_info = get_aggregated_funding_rate(COIN_ID)
-        funding_score = score_funding_rate(funding_info["aggregated_rate_pct"])
-        print(f"    funding rate: {funding_info}")
-    except Exception as e:
-        print(f"[!] Funding rate lookup skipped: {e}")
+    if not is_market_open(now_istanbul):
+        print(f"[{now_istanbul}] BIST closed, skipping.")
+        return
 
-    supertrend_score = None
-    try:
-        ohlc_df = fetch_ohlc(COIN_ID)
-        ohlc_df = compute_supertrend(ohlc_df)
-        latest_trend = ohlc_df.iloc[-1]["supertrend_trend"]
-        supertrend_score = score_supertrend(latest_trend)
-        print(f"    supertrend: trend={latest_trend}")
-    except Exception as e:
-        print(f"[!] Supertrend lookup skipped: {e}")
+    print(f"[{now_istanbul}] BIST open, scanning {len(WATCHLIST)} tickers...")
 
-    result = score_signal(df, funding_score=funding_score, supertrend_score=supertrend_score)
-    classification = classify(result["weighted_total"])
+    scanned = []
+    for symbol in WATCHLIST:
+        entry = scan_ticker(symbol)
+        if entry is None:
+            continue
+        scanned.append(entry)
 
-    current_price = df.iloc[-1]["close"]
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    label = f"{COIN_ID}/{VS_CURRENCY}"
+        print(f"    {symbol}: price={entry['price']:.2f} score={entry['result']['weighted_total']} "
+              f"classification={entry['classification']}")
 
-    state = load_state()
-    trend_classification = classify_trend_exit(result["breakdown"])
-    action, reason = decide_action(classification, trend_classification, state, current_price)
-
-    print(f"[{now}] {label} price={current_price} weighted_score={result['weighted_total']} "
-          f"classification={classification} action={action} ({reason})")
-    print(f"    breakdown: {result['breakdown']}")
-    print(f"    state: {state}")
-
-    reply_to_pending_messages(build_status_message(df, result, classification))
-
-    if action == "BUY":
-        state = {"in_position": True, "entry_price": current_price, "entry_time": now}
-        save_state(state)
-    elif action == "SELL":
-        entry_price = state.get("entry_price") or current_price
-        pnl_pct = (current_price - entry_price) / entry_price
-        state = {"in_position": False, "entry_price": None, "entry_time": None}
-        save_state(state)
-
-    if action in ("BUY", "SELL"):
-        price_range = compute_price_range(df, action)
-        range_lines = ""
-        if price_range:
-            range_lines = (
-                f"\nReference levels (not a prediction):\n"
-                f"  Entry: {price_range['entry']:.2f}\n"
-                f"  Target: {price_range['target']:.2f}\n"
-                f"  Invalidation: {price_range['invalidation']:.2f}\n"
+        if entry["classification"] in ("BUY", "STRONG BUY"):
+            price_range = compute_price_range(entry["df"])
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            message = (
+                f"{entry['classification']} on {symbol} (weighted score {entry['result']['weighted_total']:+d})\n"
+                f"Price: {entry['price']:.2f}\n\n"
+                f"Entry: {price_range['entry']:.2f}\n"
+                f"Target (sell here): {price_range['target']:.2f}\n"
+                f"Invalidation (stop): {price_range['invalidation']:.2f}\n\n"
+                f"Time: {now}"
             )
-        pnl_line = f"\nRealized P/L: {pnl_pct:+.2%}\n" if action == "SELL" else ""
-        message = (
-            f"{action} on {label} ({classification}, weighted score {result['weighted_total']:+d}/13)\n"
-            f"Price: {current_price:.2f}\n"
-            f"Reason: {reason}\n"
-            f"{pnl_line}"
-            f"{range_lines}"
-            f"Time: {now}"
-        )
-        send_telegram_message(message)
-    elif ALWAYS_NOTIFY:
-        send_telegram_message(build_status_message(df, result, classification))
+            send_telegram_message(message)
+
+    if is_morning_scan_window(now_istanbul) and scanned:
+        send_morning_summary(scanned)
+
+    if scanned:
+        reply_to_pending_messages(f"Last scan covered {len(scanned)}/{len(WATCHLIST)} tickers.")
 
 
 def main() -> None:
-    print(f"Starting spot signal bot for {COIN_ID}/{VS_CURRENCY}. Checking every {CHECK_INTERVAL_SECONDS}s.")
+    print(f"Starting BIST signal bot for {len(WATCHLIST)} tickers.")
     while True:
         try:
             run_once()
