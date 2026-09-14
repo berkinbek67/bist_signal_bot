@@ -5,62 +5,13 @@ Python port of the classic "Supertrend" indicator (ATR-based trend
 following). This is a well-known, widely reproduced open-source
 indicator, not a proprietary one.
 
-Needs real OHLC (high/low/close) candles, which our main price feed
-(CoinGecko) doesn't provide -- so this pulls candles directly from an
-exchange's public spot market API instead. Binance spot is tried first
-(different service from the futures API that gets blocked on GitHub's
-servers), with Bybit spot as a fallback.
+Needs real OHLC (high/low/close) candles. For BIST, Yahoo Finance's
+chart API (see bist_data.py) already provides full OHLCV in one call,
+so this module only needs the actual indicator math -- no separate
+data-fetching functions like the earlier crypto version required.
 """
 
-import requests
 import pandas as pd
-from funding_rate import BASE_SYMBOL_MAP
-
-
-def fetch_ohlc_binance(base: str, interval: str = "5m", limit: int = 200) -> pd.DataFrame:
-    symbol = f"{base}USDT"
-    url = "https://api.binance.com/api/v3/klines"
-    response = requests.get(url, params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=10)
-    response.raise_for_status()
-    raw = response.json()
-    df = pd.DataFrame(raw, columns=[
-        "open_time", "open", "high", "low", "close", "volume",
-        "close_time", "qav", "trades", "tbbav", "tbqav", "ignore",
-    ])
-    for col in ["high", "low", "close"]:
-        df[col] = df[col].astype(float)
-    df["close_time"] = pd.to_datetime(df["close_time"], unit="ms")
-    return df[["close_time", "high", "low", "close"]]
-
-
-def fetch_ohlc_bybit(base: str, interval: str = "5", limit: int = 200) -> pd.DataFrame:
-    symbol = f"{base}USDT"
-    url = "https://api.bybit.com/v5/market/kline"
-    response = requests.get(
-        url, params={"category": "spot", "symbol": symbol, "interval": interval, "limit": limit}, timeout=10
-    )
-    response.raise_for_status()
-    raw = response.json()["result"]["list"]
-    # Bybit returns newest-first: [start, open, high, low, close, volume, turnover]
-    rows = list(reversed(raw))
-    df = pd.DataFrame(rows, columns=["start", "open", "high", "low", "close", "volume", "turnover"])
-    for col in ["high", "low", "close"]:
-        df[col] = df[col].astype(float)
-    df["close_time"] = pd.to_datetime(df["start"].astype(float), unit="ms")
-    return df[["close_time", "high", "low", "close"]]
-
-
-def fetch_ohlc(coin_id: str) -> pd.DataFrame:
-    """Try Binance spot first, fall back to Bybit spot if it fails."""
-    base = BASE_SYMBOL_MAP.get(coin_id)
-    if base is None:
-        raise ValueError(f"No ticker mapping for '{coin_id}' in BASE_SYMBOL_MAP")
-
-    try:
-        return fetch_ohlc_binance(base)
-    except Exception as e:
-        print(f"[!] Binance spot OHLC failed ({e}), trying Bybit spot...")
-        return fetch_ohlc_bybit(base)
 
 
 def compute_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0,
@@ -69,7 +20,7 @@ def compute_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 3
     Direct port of the Pine Script's recursive up/dn/trend logic. Each
     value only depends on the PREVIOUS bar's already-finalized values --
     same causal structure as the original indicator, so this is safe to
-    reuse in the backtest's walk-forward loop with no look-ahead.
+    reuse in a walk-forward backtest loop with no look-ahead.
     """
     df = df.copy()
     high, low, close = df["high"], df["low"], df["close"]
