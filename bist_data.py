@@ -51,6 +51,30 @@ def is_market_open(now: datetime | None = None) -> bool:
     return MARKET_OPEN_HOUR <= now.hour < MARKET_CLOSE_HOUR
 
 
+def is_forex_market_open(now: datetime | None = None) -> bool:
+    """
+    True if the forex/commodities market is trading. Unlike BIST, this
+    market runs nearly continuously: opens Sunday ~22:00 UTC and closes
+    Friday ~22:00 UTC, with no daily close in between. Only genuinely
+    closed on the weekend gap. Does not account for holidays.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    else:
+        now = now.astimezone(timezone.utc)
+
+    weekday = now.weekday()  # 0=Monday ... 5=Saturday, 6=Sunday
+    hour = now.hour
+
+    if weekday == 5:  # Saturday -- always closed
+        return False
+    if weekday == 6 and hour < 22:  # Sunday before 22:00 UTC -- still closed
+        return False
+    if weekday == 4 and hour >= 22:  # Friday after 22:00 UTC -- closed for the weekend
+        return False
+    return True
+
+
 def fetch_ohlc_yahoo(symbol: str, range_: str = "5d", interval: str = "15m") -> pd.DataFrame:
     """
     Fetch OHLCV candles from Yahoo Finance's public chart endpoint.
@@ -83,3 +107,31 @@ def fetch_ohlc_yahoo(symbol: str, range_: str = "5d", interval: str = "15m") -> 
     # Yahoo sometimes includes null rows for illiquid moments -- drop them.
     df = df.dropna(subset=["close"]).reset_index(drop=True)
     return df
+
+
+def fetch_ohlc_cross(base_ticker: str, quote_ticker: str, range_: str = "5d",
+                      interval: str = "15m") -> pd.DataFrame:
+    """
+    For pairs Yahoo doesn't have directly (e.g. XAUEUR), compute the
+    cross rate ourselves: base_ticker / quote_ticker at each matching
+    timestamp. Standard practice when a direct symbol doesn't exist --
+    e.g. XAUEUR = XAUUSD / EURUSD.
+
+    Uses an inner join on close_time, so any timestamp missing from
+    either series is dropped rather than guessed at.
+    """
+    base_df = fetch_ohlc_yahoo(base_ticker, range_=range_, interval=interval)
+    quote_df = fetch_ohlc_yahoo(quote_ticker, range_=range_, interval=interval)
+
+    merged = pd.merge(
+        base_df, quote_df, on="close_time", suffixes=("_base", "_quote"), how="inner"
+    )
+    if len(merged) == 0:
+        raise ValueError(f"No overlapping timestamps between {base_ticker} and {quote_ticker}")
+
+    result = pd.DataFrame({"close_time": merged["close_time"]})
+    for col in ["open", "high", "low", "close"]:
+        result[col] = merged[f"{col}_base"] / merged[f"{col}_quote"]
+    result["volume"] = merged["volume_base"]  # volume doesn't cross-divide meaningfully
+
+    return result
