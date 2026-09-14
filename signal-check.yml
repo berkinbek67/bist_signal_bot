@@ -1,12 +1,11 @@
 name: Crypto Signal Check
 
 on:
+  # Every 15 min, only during BIST's 10:00-18:00 Istanbul session (Istanbul
+  # is UTC+3 year-round, so that's 07:00-14:59 UTC), Monday-Friday only.
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '*/15 7-14 * * 1-5'
   workflow_dispatch: {}
-
-permissions:
-  contents: write
 
 jobs:
   check-signal:
@@ -21,10 +20,3 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      - name: Save updated position state
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add state.json
-          git diff --cached --quiet || git commit -m "Update position state [skip ci]"
-          git push
