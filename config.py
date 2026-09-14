@@ -51,6 +51,15 @@ STRONG_BUY_THRESHOLD = 10
 SELL_THRESHOLD = -6
 STRONG_SELL_THRESHOLD = -10
 
+# --- Exit-only trend filter ---
+# SELL decisions look ONLY at these factors (not the full composite), so
+# short-term noise (RSI, Volume, Bollinger Bands, Funding) can't shake you
+# out of a position while the actual trend is still intact. Max possible
+# score here = 2+2+2+2 = 8 (each weighted at 2, matching INDICATOR_WEIGHTS).
+TREND_EXIT_FACTORS = ["EMA crossover", "Trend (vs EMA200)", "MACD", "Supertrend"]
+TREND_SELL_THRESHOLD = -4
+TREND_STRONG_SELL_THRESHOLD = -6
+
 # Supertrend parameters (from the original Pine Script defaults)
 SUPERTREND_PERIOD = 10
 SUPERTREND_MULTIPLIER = 3.0
