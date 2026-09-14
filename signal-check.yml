@@ -1,12 +1,10 @@
 name: BIST Signal Check
 
 on:
-  # Runs every 15 min, every day. The script itself checks
-  # is_forex_market_open() and skips silently on the weekend gap --
-  # simpler and more precise than trying to encode "closed Sat, closed
-  # Sun before 22:00 UTC, closed Fri after 22:00 UTC" in cron syntax.
+  # Every 5 minutes, every day. The script checks is_forex_market_open()
+  # and skips silently on the weekend gap.
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch: {}
 
 jobs:
