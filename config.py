@@ -7,11 +7,16 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# --- Market settings (BIST via Yahoo Finance) ---
-# Watchlist of tickers to scan every check. Uses Yahoo's ".IS" suffix.
-# Starter list is BIST_30_WATCHLIST from bist_data.py -- edit freely.
-from bist_data import BIST_30_WATCHLIST
-WATCHLIST = BIST_30_WATCHLIST
+# --- Market settings (Forex/Commodities via Yahoo Finance) ---
+# Only 3 instruments now: Brent Crude, Gold/USD, Gold/EUR (computed as a
+# cross rate since Yahoo has no direct XAUEUR ticker).
+WATCHLIST = ["BZ=F", "XAUUSD=X", "XAUEUR"]
+
+# XAUEUR isn't a real Yahoo ticker -- when scanning it, fetch these two
+# instead and divide (see fetch_ohlc_cross in bist_data.py).
+CROSS_RATE_PAIRS = {
+    "XAUEUR": ("XAUUSD=X", "EURUSD=X"),
+}
 
 OHLC_RANGE = "1mo"    # how far back to fetch (needs 200+ candles for EMA200)
 OHLC_INTERVAL = "15m" # candle size
