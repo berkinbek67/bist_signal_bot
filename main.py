@@ -44,6 +44,9 @@ from config import (
     FEE_RATE,
     MIN_PROFIT_MARGIN,
     ALLOW_STRONG_SELL_OVERRIDE,
+    TREND_EXIT_FACTORS,
+    TREND_SELL_THRESHOLD,
+    TREND_STRONG_SELL_THRESHOLD,
     STATE_FILE,
     TARGET_BAND_FRACTION,
     STOP_BAND_FRACTION,
@@ -185,12 +188,33 @@ def save_state(state: dict) -> None:
         json.dump(state, f)
 
 
-def decide_action(classification: str, state: dict, current_price: float) -> tuple[str, str]:
+def classify_trend_exit(breakdown: dict) -> str:
     """
-    Decide the actual action given the classification AND current position
-    state. This is what prevents excessive trading: a BUY/SELL label alone
-    is not enough -- we also check whether it's a valid transition, and
-    for exits, whether the move clears trading costs.
+    Exit decisions look ONLY at the trend/momentum block (EMA crossover,
+    EMA200 trend, MACD, Supertrend) -- not the full composite. This
+    prevents short-term noise (RSI, Volume, Bollinger Bands, Funding)
+    from shaking you out of a position while the actual trend is intact.
+    Entries still use the full composite; only exits are narrowed.
+    """
+    trend_score = sum(
+        breakdown[name] * INDICATOR_WEIGHTS[name]
+        for name in TREND_EXIT_FACTORS
+        if name in breakdown
+    )
+    if trend_score <= TREND_STRONG_SELL_THRESHOLD:
+        return "STRONG SELL"
+    if trend_score <= TREND_SELL_THRESHOLD:
+        return "SELL"
+    return "HOLD"
+
+
+def decide_action(classification: str, trend_classification: str, state: dict,
+                   current_price: float) -> tuple[str, str]:
+    """
+    Decide the actual action given the position state. Entries use the
+    full composite classification (all factors). Exits use ONLY the
+    trend-block classification, so a solid trend isn't undermined by
+    noisy short-term indicators.
 
     Returns (action, reason) where action is one of BUY / SELL / HOLD.
     """
@@ -202,7 +226,7 @@ def decide_action(classification: str, state: dict, current_price: float) -> tup
         return "HOLD", "Not in position, no buy signal"
 
     # We ARE in position -- only ever consider exiting, never shorting.
-    if classification in ("SELL", "STRONG SELL"):
+    if trend_classification in ("SELL", "STRONG SELL"):
         entry_price = state.get("entry_price")
         if entry_price is None:
             return "SELL", "In position with no recorded entry price -- exiting to be safe"
@@ -210,15 +234,15 @@ def decide_action(classification: str, state: dict, current_price: float) -> tup
         pnl_pct = (current_price - entry_price) / entry_price
         round_trip_cost = 2 * FEE_RATE + MIN_PROFIT_MARGIN
 
-        if classification == "STRONG SELL" and ALLOW_STRONG_SELL_OVERRIDE:
-            return "SELL", f"STRONG SELL overrides fee filter (P/L {pnl_pct:+.2%})"
+        if trend_classification == "STRONG SELL" and ALLOW_STRONG_SELL_OVERRIDE:
+            return "SELL", f"Trend turned strongly bearish, overrides fee filter (P/L {pnl_pct:+.2%})"
 
         if abs(pnl_pct) >= round_trip_cost:
-            return "SELL", f"Move clears trading costs (P/L {pnl_pct:+.2%} vs {round_trip_cost:.2%} threshold)"
+            return "SELL", f"Trend turned bearish and move clears trading costs (P/L {pnl_pct:+.2%} vs {round_trip_cost:.2%} threshold)"
 
-        return "HOLD", f"SELL signal too weak to clear fees (P/L {pnl_pct:+.2%} vs {round_trip_cost:.2%} threshold)"
+        return "HOLD", f"Trend turned bearish but move too weak to clear fees (P/L {pnl_pct:+.2%} vs {round_trip_cost:.2%} threshold)"
 
-    return "HOLD", "In position, no exit signal"
+    return "HOLD", "In position, trend still intact"
 
 
 # ---------- Reference price levels ----------
@@ -343,7 +367,8 @@ def run_once() -> None:
     label = f"{COIN_ID}/{VS_CURRENCY}"
 
     state = load_state()
-    action, reason = decide_action(classification, state, current_price)
+    trend_classification = classify_trend_exit(result["breakdown"])
+    action, reason = decide_action(classification, trend_classification, state, current_price)
 
     print(f"[{now}] {label} price={current_price} weighted_score={result['weighted_total']} "
           f"classification={classification} action={action} ({reason})")
