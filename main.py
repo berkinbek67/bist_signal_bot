@@ -274,6 +274,39 @@ def send_night_recap() -> None:
     send_telegram_message("\n".join(lines))
 
 
+# ---------- Message formatting (Turkish, Style 3 / dashboard) ----------
+
+DISPLAY_NAMES = {
+    "BZ=F": "BRENT",
+    "XAUUSD=X": "XAUUSD",
+    "XAUEUR": "XAUEUR",
+}
+
+CLASSIFICATION_TR = {
+    "BUY": "AL",
+    "STRONG BUY": "GÜÇLÜ AL",
+}
+
+
+def build_buy_alert_message(symbol: str, entry: dict, price_range: dict, now: datetime) -> str:
+    display_name = DISPLAY_NAMES.get(symbol, symbol)
+    label_tr = CLASSIFICATION_TR.get(entry["classification"], entry["classification"])
+    max_score = sum(INDICATOR_WEIGHTS.values())
+    now_str = now.strftime("%H:%M UTC")
+
+    return (
+        f"━━━━━━━━━━━━━\n"
+        f"  {display_name} · {label_tr}\n"
+        f"━━━━━━━━━━━━━\n"
+        f"Skor       {entry['result']['weighted_total']:+d}/{max_score}\n"
+        f"Giriş      {price_range['entry']:.4f}\n"
+        f"Hedef      {price_range['target']:.4f}\n"
+        f"Stop       {price_range['invalidation']:.4f}\n"
+        f"Saat       {now_str}\n"
+        f"━━━━━━━━━━━━━"
+    )
+
+
 def run_once() -> None:
     now = datetime.now(timezone.utc)
 
@@ -295,15 +328,7 @@ def run_once() -> None:
 
         if entry["classification"] in ("BUY", "STRONG BUY"):
             price_range = compute_price_range(entry["df"])
-            now_str = now.strftime("%Y-%m-%d %H:%M:%S UTC")
-            message = (
-                f"{entry['classification']} on {symbol} (weighted score {entry['result']['weighted_total']:+d})\n"
-                f"Price: {entry['price']:.4f}\n\n"
-                f"Entry: {price_range['entry']:.4f}\n"
-                f"Target (sell here): {price_range['target']:.4f}\n"
-                f"Invalidation (stop): {price_range['invalidation']:.4f}\n\n"
-                f"Time: {now_str}"
-            )
+            message = build_buy_alert_message(symbol, entry, price_range, now)
             send_telegram_message(message)
 
     if scanned:
