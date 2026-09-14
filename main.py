@@ -45,6 +45,8 @@ from config import (
     INDICATOR_WEIGHTS,
     BUY_THRESHOLD,
     STRONG_BUY_THRESHOLD,
+    SELL_THRESHOLD,
+    STRONG_SELL_THRESHOLD,
     TARGET_BAND_FRACTION,
     STOP_BAND_FRACTION,
     CHECK_INTERVAL_SECONDS,
@@ -136,13 +138,30 @@ def classify(weighted_score: int) -> str:
         return "STRONG BUY"
     if weighted_score >= BUY_THRESHOLD:
         return "BUY"
+    if weighted_score <= STRONG_SELL_THRESHOLD:
+        return "STRONG SELL"
+    if weighted_score <= SELL_THRESHOLD:
+        return "SELL"
     return "NO SIGNAL"
 
 
-def compute_price_range(df: pd.DataFrame) -> dict:
+def compute_price_range(df: pd.DataFrame, direction: str = "LONG") -> dict:
+    """
+    Entry/Target/Invalidation as distances from current price, scaled by
+    volatility (Bollinger Band width). For LONG: target is above entry,
+    invalidation below. For SHORT: mirrored -- target below entry,
+    invalidation above. Same distances either way, just flipped sign.
+    """
     curr = df.iloc[-1]
     price = curr["close"]
     band_width = curr["bb_upper"] - curr["bb_lower"]
+
+    if direction == "SHORT":
+        return {
+            "entry": price,
+            "target": price - TARGET_BAND_FRACTION * band_width,
+            "invalidation": price + STOP_BAND_FRACTION * band_width,
+        }
     return {
         "entry": price,
         "target": price + TARGET_BAND_FRACTION * band_width,
@@ -285,6 +304,15 @@ DISPLAY_NAMES = {
 CLASSIFICATION_TR = {
     "BUY": "AL",
     "STRONG BUY": "GÜÇLÜ AL",
+    "SELL": "SAT",
+    "STRONG SELL": "GÜÇLÜ SAT",
+}
+
+DIRECTION_LINE_TR = {
+    "BUY": "→ LONG pozisyon aç",
+    "STRONG BUY": "→ LONG pozisyon aç",
+    "SELL": "→ SHORT pozisyon aç",
+    "STRONG SELL": "→ SHORT pozisyon aç",
 }
 
 
@@ -297,7 +325,9 @@ def format_eu_number(value: float, decimals: int = 4) -> str:
 
 def build_buy_alert_message(symbol: str, entry: dict, price_range: dict, now: datetime) -> str:
     display_name = DISPLAY_NAMES.get(symbol, symbol)
-    label_tr = CLASSIFICATION_TR.get(entry["classification"], entry["classification"])
+    classification = entry["classification"]
+    label_tr = CLASSIFICATION_TR.get(classification, classification)
+    direction_line = DIRECTION_LINE_TR.get(classification, "")
     max_score = sum(INDICATOR_WEIGHTS.values())
     now_str = now.strftime("%H:%M UTC")
 
@@ -305,6 +335,7 @@ def build_buy_alert_message(symbol: str, entry: dict, price_range: dict, now: da
         f"━━━━━━━━━━━━━\n"
         f"  {display_name} · {label_tr}\n"
         f"━━━━━━━━━━━━━\n"
+        f"{direction_line}\n"
         f"Skor       {entry['result']['weighted_total']:+d}/{max_score}\n"
         f"Giriş      {format_eu_number(price_range['entry'])}\n"
         f"Hedef      {format_eu_number(price_range['target'])}\n"
@@ -334,7 +365,11 @@ def run_once() -> None:
               f"classification={entry['classification']}")
 
         if entry["classification"] in ("BUY", "STRONG BUY"):
-            price_range = compute_price_range(entry["df"])
+            price_range = compute_price_range(entry["df"], direction="LONG")
+            message = build_buy_alert_message(symbol, entry, price_range, now)
+            send_telegram_message(message)
+        elif entry["classification"] in ("SELL", "STRONG SELL"):
+            price_range = compute_price_range(entry["df"], direction="SHORT")
             message = build_buy_alert_message(symbol, entry, price_range, now)
             send_telegram_message(message)
 
