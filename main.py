@@ -329,7 +329,13 @@ def build_buy_alert_message(symbol: str, entry: dict, price_range: dict, now: da
     label_tr = CLASSIFICATION_TR.get(classification, classification)
     direction_line = DIRECTION_LINE_TR.get(classification, "")
     max_score = sum(INDICATOR_WEIGHTS.values())
-    now_str = now.strftime("%H:%M UTC")
+    check_time_str = now.strftime("%H:%M UTC")
+
+    # The actual timestamp of the candle this price came from -- this is
+    # what tells you how stale the data really is, NOT the check time
+    # above (which is just when the bot happened to run).
+    data_time = entry["df"].iloc[-1]["close_time"]
+    data_time_str = data_time.strftime("%H:%M UTC")
 
     return (
         f"━━━━━━━━━━━━━\n"
@@ -340,7 +346,8 @@ def build_buy_alert_message(symbol: str, entry: dict, price_range: dict, now: da
         f"Giriş      {format_eu_number(price_range['entry'])}\n"
         f"Hedef      {format_eu_number(price_range['target'])}\n"
         f"Stop       {format_eu_number(price_range['invalidation'])}\n"
-        f"Saat       {now_str}\n"
+        f"Veri saati {data_time_str}  (fiyat bu ana ait)\n"
+        f"Kontrol    {check_time_str}  (bot bu ana kontrol etti)\n"
         f"━━━━━━━━━━━━━"
     )
 
