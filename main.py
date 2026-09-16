@@ -23,7 +23,7 @@ import time
 import requests
 import pandas as pd
 from datetime import datetime, timezone
-from bist_data import fetch_ohlc_yahoo, fetch_ohlc_cross, is_forex_market_open
+from bist_data import fetch_ohlc_yahoo, fetch_ohlc_cross, is_forex_market_open, is_us_stock_market_open
 from supertrend import compute_supertrend, score_supertrend
 from config import (
     TELEGRAM_BOT_TOKEN,
@@ -51,6 +51,12 @@ from config import (
     STOP_BAND_FRACTION,
     CHECK_INTERVAL_SECONDS,
 )
+
+# Which market-hours check applies to each symbol. Anything not listed
+# here defaults to is_forex_market_open (Brent/gold's near-24/5 schedule).
+MARKET_HOURS_CHECKS = {
+    "QQQ": is_us_stock_market_open,
+}
 
 
 # ---------- Indicators ----------
@@ -355,14 +361,15 @@ def build_buy_alert_message(symbol: str, entry: dict, price_range: dict, now: da
 def run_once() -> None:
     now = datetime.now(timezone.utc)
 
-    if not is_forex_market_open(now):
-        print(f"[{now}] Market closed (weekend), skipping.")
-        return
-
-    print(f"[{now}] Market open, scanning {len(WATCHLIST)} instruments...")
+    print(f"[{now}] Checking {len(WATCHLIST)} instruments...")
 
     scanned = []
     for symbol in WATCHLIST:
+        market_check = MARKET_HOURS_CHECKS.get(symbol, is_forex_market_open)
+        if not market_check(now):
+            print(f"    {symbol}: market closed, skipping.")
+            continue
+
         entry = scan_ticker(symbol)
         if entry is None:
             continue
