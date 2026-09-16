@@ -24,6 +24,7 @@ import requests
 import pandas as pd
 from datetime import datetime, timezone
 from bist_data import fetch_ohlc_yahoo, fetch_ohlc_cross, is_forex_market_open, is_us_stock_market_open
+from ict_concepts import is_qqq_kill_zone, score_equal_levels
 from supertrend import compute_supertrend, score_supertrend
 from config import (
     TELEGRAM_BOT_TOKEN,
@@ -133,6 +134,7 @@ def score_signal(df: pd.DataFrame) -> dict:
         breakdown["Bollinger Bands"] = 0
 
     breakdown["Supertrend"] = score_supertrend(curr["supertrend_trend"])
+    breakdown["Equal Highs/Lows"] = score_equal_levels(df)
 
     raw_total = sum(breakdown.values())
     weighted_total = sum(val * INDICATOR_WEIGHTS[name] for name, val in breakdown.items())
@@ -381,6 +383,14 @@ def run_once() -> None:
 
         print(f"    {symbol}: price={entry['price']:.4f} score={entry['result']['weighted_total']} "
               f"classification={entry['classification']}")
+
+        # QQQ alerts only fire during its ICT kill zone (09:30-11:00 ET) --
+        # we still scan and log it across the full session for visibility,
+        # just don't message outside that window. Doesn't apply to the
+        # other instruments.
+        if symbol == "QQQ" and not is_qqq_kill_zone(now):
+            print(f"    {symbol}: outside kill zone, suppressing alert.")
+            continue
 
         if entry["classification"] in ("BUY", "STRONG BUY"):
             price_range = compute_price_range(entry["df"], direction="LONG")
