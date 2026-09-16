@@ -17,6 +17,11 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # -- this is NOT the fresher near-real-time data true spot forex has.
 WATCHLIST = ["BZ=F", "GC=F", "XAUEUR", "QQQ"]
 
+# Symbols messaged as plain AL/SAT (buy/sell shares), not "LONG/SHORT
+# pozisyon aç" -- for instruments people typically hold outright rather
+# than trade as a leveraged/CFD position.
+SPOT_STYLE_SYMBOLS = ["QQQ"]
+
 # XAUEUR isn't a real Yahoo ticker -- when scanning it, fetch these two
 # instead and divide (see fetch_ohlc_cross in bist_data.py).
 CROSS_RATE_PAIRS = {
