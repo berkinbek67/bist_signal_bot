@@ -15,7 +15,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # Like BZ=F, GC=F is a regulated futures contract, so it carries its own
 # "COMEX - Delayed Quote" delay, similar to how BIST stocks were delayed
 # -- this is NOT the fresher near-real-time data true spot forex has.
-WATCHLIST = ["BZ=F", "GC=F", "XAUEUR"]
+WATCHLIST = ["BZ=F", "GC=F", "XAUEUR", "QQQ"]
 
 # XAUEUR isn't a real Yahoo ticker -- when scanning it, fetch these two
 # instead and divide (see fetch_ohlc_cross in bist_data.py).
