@@ -29,6 +29,7 @@ from config import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     WATCHLIST,
+    SPOT_STYLE_SYMBOLS,
     CROSS_RATE_PAIRS,
     OHLC_RANGE,
     OHLC_INTERVAL,
@@ -333,7 +334,8 @@ def build_buy_alert_message(symbol: str, entry: dict, price_range: dict, now: da
     display_name = DISPLAY_NAMES.get(symbol, symbol)
     classification = entry["classification"]
     label_tr = CLASSIFICATION_TR.get(classification, classification)
-    direction_line = DIRECTION_LINE_TR.get(classification, "")
+    is_spot_style = symbol in SPOT_STYLE_SYMBOLS
+    direction_line = "" if is_spot_style else DIRECTION_LINE_TR.get(classification, "")
     max_score = sum(INDICATOR_WEIGHTS.values())
     check_time_str = now.strftime("%H:%M UTC")
 
@@ -343,11 +345,13 @@ def build_buy_alert_message(symbol: str, entry: dict, price_range: dict, now: da
     data_time = entry["df"].iloc[-1]["close_time"]
     data_time_str = data_time.strftime("%H:%M UTC")
 
+    direction_block = f"{direction_line}\n" if direction_line else ""
+
     return (
         f"━━━━━━━━━━━━━\n"
         f"  {display_name} · {label_tr}\n"
         f"━━━━━━━━━━━━━\n"
-        f"{direction_line}\n"
+        f"{direction_block}"
         f"Skor       {entry['result']['weighted_total']:+d}/{max_score}\n"
         f"Giriş      {format_eu_number(price_range['entry'])}\n"
         f"Hedef      {format_eu_number(price_range['target'])}\n"
