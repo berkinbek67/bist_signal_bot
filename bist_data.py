@@ -87,7 +87,22 @@ def is_forex_market_open(now: datetime | None = None) -> bool:
     if hour == 17:  # 5-6pm ET daily maintenance break, Monday-Thursday
         return False
     return True
-    return True
+
+
+def market_closed_reason(now: datetime | None = None) -> str:
+    """Human-readable reason the market is currently closed (Turkish).
+    Only meaningful to call when is_forex_market_open(now) is False."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    now_ny = now.astimezone(NY_TZ)
+    weekday = now_ny.weekday()
+    hour = now_ny.hour
+
+    if weekday == 5 or (weekday == 6 and hour < 18) or (weekday == 4 and hour >= 17):
+        return "hafta sonu"
+    if hour == 17:
+        return "günlük bakım molası (17:00-18:00 ET)"
+    return "kapalı"
 
 
 def fetch_ohlc_yahoo(symbol: str, range_: str = "5d", interval: str = "15m") -> pd.DataFrame:
@@ -150,3 +165,23 @@ def fetch_ohlc_cross(base_ticker: str, quote_ticker: str, range_: str = "5d",
     result["volume"] = merged["volume_base"]  # volume doesn't cross-divide meaningfully
 
     return result
+
+
+def is_us_stock_market_open(now: datetime | None = None) -> bool:
+    """
+    True if NYSE/Nasdaq's regular session is trading: 9:30 AM - 4:00 PM
+    ET, Monday-Friday. Unlike Brent/gold, this is a genuinely narrow
+    window, not a near-24/5 market. Does not account for US market
+    holidays (Thanksgiving, July 4th, etc.) -- add a holiday calendar
+    later if that matters.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    now_ny = now.astimezone(NY_TZ)
+
+    if now_ny.weekday() >= 5:  # Saturday or Sunday
+        return False
+
+    market_open = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close = now_ny.replace(hour=16, minute=0, second=0, microsecond=0)
+    return market_open <= now_ny < market_close
