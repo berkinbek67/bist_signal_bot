@@ -66,6 +66,9 @@ INDICATOR_WEIGHTS = {
     "RSI": 1,
     "Volume": 1,
     "Bollinger Bands": 1,
+    "Equal Highs/Lows": 1,  # weighted like a confirmation factor, not a trend one --
+                             # less rigorously validated than the others, so it gets
+                             # a lighter vote rather than equal say with EMA/MACD/etc.
 }
 
 # --- Signal frequency ---
