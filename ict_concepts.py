@@ -25,8 +25,8 @@ from bist_data import NY_TZ
 
 QQQ_KILL_ZONE_START_HOUR = 9
 QQQ_KILL_ZONE_START_MINUTE = 30
-QQQ_KILL_ZONE_END_HOUR = 11
-QQQ_KILL_ZONE_END_MINUTE = 0
+QQQ_KILL_ZONE_END_HOUR = 12  # widened from 11:00 -- matches the broader
+QQQ_KILL_ZONE_END_MINUTE = 0  # "NY AM session" window some ICT sources use
 
 
 def is_qqq_kill_zone(now: datetime | None = None) -> bool:
