@@ -15,7 +15,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # Like BZ=F, GC=F is a regulated futures contract, so it carries its own
 # "COMEX - Delayed Quote" delay, similar to how BIST stocks were delayed
 # -- this is NOT the fresher near-real-time data true spot forex has.
-WATCHLIST = ["BZ=F", "GC=F", "XAUEUR", "QQQ"]
+WATCHLIST = ["BZ=F", "QQQ"]
 
 # Symbols messaged as plain AL/SAT instead of "LONG/SHORT pozisyon aç".
 # Empty for now -- every instrument uses the same LONG/SHORT framing.
@@ -23,9 +23,7 @@ SPOT_STYLE_SYMBOLS = []
 
 # XAUEUR isn't a real Yahoo ticker -- when scanning it, fetch these two
 # instead and divide (see fetch_ohlc_cross in bist_data.py).
-CROSS_RATE_PAIRS = {
-    "XAUEUR": ("GC=F", "EURUSD=X"),
-}
+CROSS_RATE_PAIRS = {}
 
 OHLC_RANGE = "5d"    # Yahoo only keeps 1-minute data for the last 7 days -- 5d stays safely inside that limit
 OHLC_INTERVAL = "1m" # candle size -- now on a 1-minute timeframe as requested
@@ -74,12 +72,12 @@ INDICATOR_WEIGHTS = {
 # Scaled down proportionally from the crypto version's thresholds to
 # match the new max score of 11 (was 13). Still on the loose/frequent
 # side by design -- revisit once you've seen real BIST signal volume.
-BUY_THRESHOLD = 2
-STRONG_BUY_THRESHOLD = 5
+BUY_THRESHOLD = 3
+STRONG_BUY_THRESHOLD = 6
 
 # Mirrors of the BUY thresholds, for short signals.
-SELL_THRESHOLD = -2
-STRONG_SELL_THRESHOLD = -5
+SELL_THRESHOLD = -3
+STRONG_SELL_THRESHOLD = -6
 
 # --- Trading cost assumptions ---
 # IMPORTANT: Turkish brokerage commissions vary a lot by broker (often a
