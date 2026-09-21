@@ -20,6 +20,15 @@ there -- and then (2) close back on the other side of it, confirming
 the reversal. Proximity alone (price just sitting near the level) no
 longer scores anything; the level has to actually get swept and
 rejected.
+
+Fair Value Gap (FVG): a 3-candle imbalance -- candle 1 and candle 3
+don't overlap, leaving a price gap that candle 2 blew straight
+through. That gap is treated as a support zone (if it was a bullish/
+up-gap) or a resistance zone (if bearish/down-gap) that price tends
+to revisit later. Scored the same way as Liquidity Sweep: price has
+to actually trade back INTO the gap and then close back out on the
+far side (a rejection), not just sit near it. A gap that gets fully
+closed through instead of rejected is "used up" and stops signaling.
 """
 
 from datetime import datetime, timezone
@@ -196,5 +205,118 @@ def score_liquidity_sweep(
     if bullish_sweep_idx is not None:
         return 1
     if bearish_sweep_idx is not None:
+        return -1
+    return 0
+
+
+def find_fair_value_gaps(df: pd.DataFrame, min_gap_pct: float = 0.0005) -> list:
+    """
+    Scans every 3-candle window (i-2, i-1, i) for a Fair Value Gap:
+
+    Bullish FVG: candle i's low is above candle (i-2)'s high -- the
+    middle candle rallied so hard it left a gap between them. The
+    zone is [candle(i-2).high, candle(i).low], and it's treated as a
+    support area price may return to.
+
+    Bearish FVG: candle i's high is below candle (i-2)'s low -- the
+    mirror image, a down-gap treated as a resistance area.
+
+    `min_gap_pct` filters out microscopic gaps (as a fraction of
+    price) so 1-minute noise doesn't generate a new zone every other
+    candle. Only ever looks at candle i and two candles before it, so
+    a gap is "confirmed" the moment candle i closes -- no look-ahead.
+
+    Returns a list of dicts: {"type": "bullish"/"bearish", "top":
+    float, "bottom": float, "formed_idx": int}.
+    """
+    highs = df["high"].values
+    lows = df["low"].values
+    n = len(df)
+    zones = []
+
+    for i in range(2, n):
+        c1_high, c1_low = highs[i - 2], lows[i - 2]
+        c3_high, c3_low = highs[i], lows[i]
+
+        if c3_low > c1_high:
+            gap_bottom, gap_top = c1_high, c3_low
+            if (gap_top - gap_bottom) / gap_bottom >= min_gap_pct:
+                zones.append({"type": "bullish", "top": gap_top, "bottom": gap_bottom, "formed_idx": i})
+
+        if c3_high < c1_low:
+            gap_bottom, gap_top = c3_high, c1_low
+            if (gap_top - gap_bottom) / gap_bottom >= min_gap_pct:
+                zones.append({"type": "bearish", "top": gap_top, "bottom": gap_bottom, "formed_idx": i})
+
+    return zones
+
+
+def score_fair_value_gap(
+    df: pd.DataFrame,
+    min_gap_pct: float = 0.0005,
+    max_zone_age: int = 100,
+) -> int:
+    """
+    +1 if price just dipped INTO an unfilled bullish FVG zone and
+    closed back ABOVE it (support held -- rejection off the gap).
+
+    -1 if price just rallied INTO an unfilled bearish FVG zone and
+    closed back BELOW it (resistance held -- rejection off the gap).
+
+    A zone only counts once: if some candle between its formation and
+    now already closed all the way through it (fully filling the
+    gap instead of rejecting off it), it's treated as used up and is
+    skipped. `max_zone_age` caps how many candles old a gap can be
+    before it stops being considered "live". Only ever looks at
+    candles up to and including the current (last) one, so this is
+    look-ahead safe.
+    """
+    zones = find_fair_value_gaps(df, min_gap_pct=min_gap_pct)
+    n = len(df)
+    current_idx = n - 1
+    closes = df["close"].values
+
+    curr = df.iloc[-1]
+    current_close, current_low, current_high = curr["close"], curr["low"], curr["high"]
+
+    candidates = [
+        z for z in zones
+        if z["formed_idx"] < current_idx and (current_idx - z["formed_idx"]) <= max_zone_age
+    ]
+
+    best_bullish_idx = None
+    best_bearish_idx = None
+
+    for z in candidates:
+        # skip zones already fully closed-through (used up) before the current candle
+        already_filled_through = False
+        for j in range(z["formed_idx"] + 1, current_idx):
+            if z["type"] == "bullish" and closes[j] < z["bottom"]:
+                already_filled_through = True
+                break
+            if z["type"] == "bearish" and closes[j] > z["top"]:
+                already_filled_through = True
+                break
+        if already_filled_through:
+            continue
+
+        if z["type"] == "bullish":
+            touched = current_low <= z["top"]
+            rejected = current_close > z["top"]
+            if touched and rejected:
+                if best_bullish_idx is None or z["formed_idx"] > best_bullish_idx:
+                    best_bullish_idx = z["formed_idx"]
+        else:
+            touched = current_high >= z["bottom"]
+            rejected = current_close < z["bottom"]
+            if touched and rejected:
+                if best_bearish_idx is None or z["formed_idx"] > best_bearish_idx:
+                    best_bearish_idx = z["formed_idx"]
+
+    if best_bullish_idx is not None and best_bearish_idx is not None:
+        return 1 if best_bullish_idx > best_bearish_idx else -1
+    if best_bullish_idx is not None:
+        return 1
+    if best_bearish_idx is not None:
         return -1
     return 0
