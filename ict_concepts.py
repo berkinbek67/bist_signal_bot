@@ -11,12 +11,15 @@ vary somewhat on exact times, but for Nasdaq/QQQ specifically, the
 consensus "high activity" window is the first ~90 minutes after the
 9:30 ET cash open (09:30-11:00 ET).
 
-Equal Highs/Lows: price levels where two or more recent swing
-highs (or lows) cluster closely together. ICT interpretation: these
-are liquidity pools -- price often sweeps slightly past them (grabbing
-stop orders) before reversing. Scored as a mean-reversion-style factor:
-price near a cluster of equal highs -> bearish lean; near equal lows
--> bullish lean.
+Liquidity Sweep: price levels where two or more recent swing highs
+(or lows) cluster closely together are treated as resting liquidity
+pools. Unlike a plain "equal highs/lows" proximity check, this looks
+for the actual ICT event: price has to (1) break past the level --
+a high/low wick trading through it, grabbing the stop orders resting
+there -- and then (2) close back on the other side of it, confirming
+the reversal. Proximity alone (price just sitting near the level) no
+longer scores anything; the level has to actually get swept and
+rejected.
 """
 
 from datetime import datetime, timezone
@@ -97,24 +100,101 @@ def find_equal_level_zones(points: list, tolerance_pct: float = 0.001) -> list:
     return zones
 
 
-def score_equal_levels(df: pd.DataFrame, window: int = 5, tolerance_pct: float = 0.001) -> int:
+def find_equal_level_zones_indexed(points: list, tolerance_pct: float = 0.001) -> list:
     """
-    +1 if current price is near a cluster of equal LOWS (potential
-    liquidity sweep -> bullish reversal zone).
-    -1 if near a cluster of equal HIGHS (potential liquidity sweep ->
-    bearish reversal zone).
-    0 otherwise.
+    Same clustering as find_equal_level_zones, but also returns the
+    index of the most recent point in each cluster -- i.e. the candle
+    at which the level became a confirmed 2+ point equal-high/low zone.
+    Used so the sweep detector only looks for a sweep AFTER the level
+    actually existed (no look-ahead).
+    Returns a list of (avg_price, formed_at_index) tuples.
+    """
+    if len(points) < 2:
+        return []
+
+    pts_sorted = sorted(points, key=lambda p: p[1])
+    zones = []
+    cluster = [pts_sorted[0]]
+
+    for pt in pts_sorted[1:]:
+        if abs(pt[1] - cluster[-1][1]) / cluster[-1][1] <= tolerance_pct:
+            cluster.append(pt)
+        else:
+            if len(cluster) >= 2:
+                avg_price = sum(p for _, p in cluster) / len(cluster)
+                formed_at = max(i for i, _ in cluster)
+                zones.append((avg_price, formed_at))
+            cluster = [pt]
+    if len(cluster) >= 2:
+        avg_price = sum(p for _, p in cluster) / len(cluster)
+        formed_at = max(i for i, _ in cluster)
+        zones.append((avg_price, formed_at))
+
+    return zones
+
+
+def score_liquidity_sweep(
+    df: pd.DataFrame,
+    window: int = 5,
+    tolerance_pct: float = 0.001,
+    sweep_lookback: int = 20,
+) -> int:
+    """
+    Detects an actual liquidity sweep event -- not just proximity to a
+    level:
+
+    Bearish sweep (-1): an equal-highs zone got a high wick traded
+    through it (stop-hunt above the highs), and price has since closed
+    back BELOW that level -- the breakout failed and reversed down.
+
+    Bullish sweep (+1): an equal-lows zone got a low wick traded
+    through it (stop-hunt below the lows), and price has since closed
+    back ABOVE that level -- the breakdown failed and reversed up.
+
+    `sweep_lookback` caps how many candles ago the sweep wick is
+    allowed to have happened, so a sweep from days ago doesn't keep
+    scoring forever. Only uses swing points/candles at or before the
+    current candle, so this is look-ahead safe: nothing here depends
+    on any bar past df.iloc[-1].
     """
     swing_highs, swing_lows = find_swing_points(df, window=window)
-    high_zones = find_equal_level_zones(swing_highs, tolerance_pct)
-    low_zones = find_equal_level_zones(swing_lows, tolerance_pct)
+    high_zones = find_equal_level_zones_indexed(swing_highs, tolerance_pct)
+    low_zones = find_equal_level_zones_indexed(swing_lows, tolerance_pct)
 
-    current_price = df.iloc[-1]["close"]
+    highs = df["high"].values
+    lows = df["low"].values
+    n = len(df)
+    current_idx = n - 1
+    current_close = df.iloc[-1]["close"]
 
-    for zone_price in high_zones:
-        if abs(current_price - zone_price) / zone_price <= tolerance_pct:
-            return -1
-    for zone_price in low_zones:
-        if abs(current_price - zone_price) / zone_price <= tolerance_pct:
-            return 1
+    bearish_sweep_idx = None
+    for level, formed_idx in high_zones:
+        search_start = formed_idx + 1
+        if search_start > current_idx:
+            continue
+        for i in range(search_start, n):
+            if highs[i] > level:
+                if current_close < level and (current_idx - i) <= sweep_lookback:
+                    if bearish_sweep_idx is None or i > bearish_sweep_idx:
+                        bearish_sweep_idx = i
+                break  # only the first touch of this level counts as "the sweep"
+
+    bullish_sweep_idx = None
+    for level, formed_idx in low_zones:
+        search_start = formed_idx + 1
+        if search_start > current_idx:
+            continue
+        for i in range(search_start, n):
+            if lows[i] < level:
+                if current_close > level and (current_idx - i) <= sweep_lookback:
+                    if bullish_sweep_idx is None or i > bullish_sweep_idx:
+                        bullish_sweep_idx = i
+                break
+
+    if bullish_sweep_idx is not None and bearish_sweep_idx is not None:
+        return 1 if bullish_sweep_idx > bearish_sweep_idx else -1
+    if bullish_sweep_idx is not None:
+        return 1
+    if bearish_sweep_idx is not None:
+        return -1
     return 0
