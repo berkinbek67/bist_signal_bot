@@ -66,6 +66,10 @@ INDICATOR_WEIGHTS = {
     "Liquidity Sweep": 1,  # weighted like a confirmation factor, not a trend one --
                             # less rigorously validated than the others, so it gets
                             # a lighter vote rather than equal say with EMA/MACD/etc.
+    "Fair Value Gap": 1,    # same reasoning as Liquidity Sweep -- ICT concept, no
+                            # academic backtesting track record, fires often on 1m
+                            # candles, and overlaps conceptually with Liquidity Sweep.
+                            # Bump to 2 later if it proves itself in practice.
 }
 
 # --- Signal frequency ---
