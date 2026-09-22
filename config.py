@@ -26,6 +26,18 @@ CROSS_RATE_PAIRS = {}
 OHLC_RANGE = "5d"    # Yahoo only keeps 1-minute data for the last 7 days -- 5d stays safely inside that limit
 OHLC_INTERVAL = "1m" # candle size -- now on a 1-minute timeframe as requested
 
+# --- Higher-timeframe confluence filter ---
+# The 1-minute signal is checked against the 1-hour trend before it's
+# allowed to fire -- catches the case where a 1-min liquidity sweep/FVG
+# rejection fires bullish while the broader hourly trend is actually
+# still bearish (countertrend noise, not a real confluence setup). Only
+# applied to symbols listed in HTF_FILTER_SYMBOLS; a data-fetch failure
+# or a genuinely mixed hourly read (EMA200 and Supertrend disagree)
+# does NOT block the signal -- only a clearly OPPOSING hourly trend does.
+HTF_FILTER_SYMBOLS = ["QQQ"]
+HTF_INTERVAL = "60m"
+HTF_RANGE = "6mo"
+
 # --- BIST daily picks scan ---
 # Runs once a day (its own GitHub Actions schedule, see
 # bist_daily_scan.py / bist-daily-picks.yml -- NOT a continuous
