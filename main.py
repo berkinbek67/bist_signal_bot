@@ -23,7 +23,7 @@ import time
 import requests
 import pandas as pd
 from datetime import datetime, timezone
-from bist_data import fetch_ohlc_yahoo, fetch_ohlc_cross, is_forex_market_open, is_us_stock_market_open
+from bist_data import fetch_ohlc_yahoo, fetch_ohlc_cross, is_forex_market_open, is_us_stock_market_open, BIST_30_WATCHLIST
 from ict_concepts import is_qqq_kill_zone, score_liquidity_sweep, score_fair_value_gap
 from supertrend import compute_supertrend, score_supertrend
 from config import (
@@ -52,6 +52,8 @@ from config import (
     TARGET_BAND_FRACTION,
     STOP_BAND_FRACTION,
     CHECK_INTERVAL_SECONDS,
+    BIST_DAILY_RANGE,
+    BIST_DAILY_INTERVAL,
 )
 
 # Which market-hours check applies to each symbol. Anything not listed
@@ -248,15 +250,49 @@ def scan_ticker(symbol: str) -> dict | None:
         return None
 
 
-def send_morning_summary(scanned: list[dict]) -> None:
-    ranked = sorted(scanned, key=lambda s: s["result"]["weighted_total"], reverse=True)
-    top = ranked[:MORNING_SCAN_TOP_N]
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+def scan_bist_daily(symbol: str) -> dict | None:
+    """Like scan_ticker, but fixed to DAILY candles with ~2 years of
+    history, regardless of whatever OHLC_RANGE/OHLC_INTERVAL is set to
+    for the intraday QQQ scan. This is a once-a-day informational read,
+    not a live trigger, so there's no reason to fight Yahoo's 1-minute
+    data window or worry about the same staleness that matters for QQQ."""
+    try:
+        df = fetch_ohlc_yahoo(symbol, range_=BIST_DAILY_RANGE, interval=BIST_DAILY_INTERVAL)
+        if len(df) < 210:
+            print(f"[!] {symbol}: not enough daily candles yet ({len(df)}), skipping")
+            return None
+        df = compute_indicators(df)
+        result = score_signal(df)
+        classification = classify(result["weighted_total"])
+        current_price = df.iloc[-1]["close"]
+        return {"symbol": symbol, "price": current_price, "result": result, "classification": classification}
+    except Exception as e:
+        print(f"[!] {symbol}: BIST daily scan failed ({e})")
+        return None
 
-    lines = [f"Top {len(top)} by score this morning:"]
-    for s in top:
-        lines.append(f"  {s['symbol']}: {s['result']['weighted_total']:+d} ({s['classification']}) @ {s['price']:.2f}")
-    lines.append(f"\nTime: {now}")
+
+def send_bist_daily_picks() -> None:
+    """Once-a-day BIST scan (meant to run once each weekday morning via
+    its own GitHub Actions schedule -- see bist_daily_scan.py). Runs the
+    exact same weighted scoring engine used for QQQ, but on BIST_30_WATCHLIST
+    daily candles, and only reports tickers that actually cross the BUY
+    threshold that day -- some days that's none, some days it's several."""
+    scanned = [r for r in (scan_bist_daily(s) for s in BIST_30_WATCHLIST) if r is not None]
+    picks = [s for s in scanned if s["classification"] in ("BUY", "STRONG BUY")]
+    picks.sort(key=lambda s: s["result"]["weighted_total"], reverse=True)
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    max_score = sum(INDICATOR_WEIGHTS.values())
+
+    if not picks:
+        send_telegram_message(f"Bugün için BIST'te AL / GÜÇLÜ AL sinyali veren hisse yok.\n\nZaman: {now}")
+        return
+
+    lines = ["Bugünün öne çıkan BIST hisseleri:", ""]
+    for s in picks:
+        label = CLASSIFICATION_TR.get(s["classification"], s["classification"])
+        lines.append(f"  {s['symbol']}: {label} ({s['result']['weighted_total']:+d}/{max_score}) @ {s['price']:.2f}")
+    lines.append(f"\nZaman: {now}")
     send_telegram_message("\n".join(lines))
 
 
@@ -306,9 +342,7 @@ def send_night_recap() -> None:
 # ---------- Message formatting (Turkish, Style 3 / dashboard) ----------
 
 DISPLAY_NAMES = {
-    "BZ=F": "BRENT",
-    "GC=F": "XAUUSD",
-    "XAUEUR": "XAUEUR",
+    "QQQ": "QQQ",
 }
 
 CLASSIFICATION_TR = {
