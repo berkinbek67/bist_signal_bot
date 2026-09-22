@@ -7,15 +7,13 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# --- Market settings (Forex/Commodities via Yahoo Finance) ---
-# Only 3 instruments now: Brent Crude, Gold futures (COMEX), Gold/EUR
-# (computed as a cross rate). Note: XAUUSD=X does NOT work on Yahoo's
-# actual data API (confirmed via a live 404) despite appearing to exist
-# as a quote page -- GC=F (Gold futures) is the real, working ticker.
-# Like BZ=F, GC=F is a regulated futures contract, so it carries its own
-# "COMEX - Delayed Quote" delay, similar to how BIST stocks were delayed
-# -- this is NOT the fresher near-real-time data true spot forex has.
-WATCHLIST = ["BZ=F", "QQQ"]
+# --- Market settings (Nasdaq/QQQ via Yahoo Finance) ---
+# Brent (BZ=F) dropped -- Midas charges a flat $1.5 commission per
+# transaction, which made the scalp-style trading this bot was tuned
+# for uneconomical there. QQQ stays in for tracking/notification
+# purposes even though the same commission applies -- you're not
+# trading it live off these alerts, just watching how it performs.
+WATCHLIST = ["QQQ"]
 
 # Symbols messaged as plain AL/SAT instead of "LONG/SHORT pozisyon aç".
 # Empty for now -- every instrument uses the same LONG/SHORT framing.
@@ -28,13 +26,16 @@ CROSS_RATE_PAIRS = {}
 OHLC_RANGE = "5d"    # Yahoo only keeps 1-minute data for the last 7 days -- 5d stays safely inside that limit
 OHLC_INTERVAL = "1m" # candle size -- now on a 1-minute timeframe as requested
 
-# --- Morning scan ---
-# Sends a single ranked "top N" message once per day, in this specific
-# time window (Istanbul time). No position/state tracking needed -- this
-# just checks "is it currently within this window" on every run.
-MORNING_SCAN_HOUR = 10
-MORNING_SCAN_MINUTE_WINDOW = (15, 29)  # fires once, in this 15-min window
-MORNING_SCAN_TOP_N = 5
+# --- BIST daily picks scan ---
+# Runs once a day (its own GitHub Actions schedule, see
+# bist_daily_scan.py / bist-daily-picks.yml -- NOT a continuous
+# in-code time check), scores every ticker in BIST_30_WATCHLIST on
+# DAILY candles, and reports only the ones that actually cross the BUY
+# threshold that day. This is informational only, not a live intraday
+# trigger -- Yahoo's BIST data delay is fine for a once-a-day read but
+# was exactly why BIST got dropped as a live scalping target earlier.
+BIST_DAILY_RANGE = "2y"
+BIST_DAILY_INTERVAL = "1d"
 
 # --- Indicator settings ---
 EMA_FAST = 9
