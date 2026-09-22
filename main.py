@@ -54,6 +54,9 @@ from config import (
     CHECK_INTERVAL_SECONDS,
     BIST_DAILY_RANGE,
     BIST_DAILY_INTERVAL,
+    HTF_FILTER_SYMBOLS,
+    HTF_INTERVAL,
+    HTF_RANGE,
 )
 
 # Which market-hours check applies to each symbol. Anything not listed
@@ -250,6 +253,39 @@ def scan_ticker(symbol: str) -> dict | None:
         return None
 
 
+def get_htf_trend(symbol: str) -> str:
+    """Higher-timeframe (1-hour) confluence read, used to filter out 1-min
+    signals that fire against the broader trend. Reuses the exact same
+    Trend-vs-EMA200 and Supertrend logic already used in score_signal --
+    no new indicator, just applied on the hourly candles instead of the
+    1-minute ones.
+
+    Returns 'bullish' only if EMA200 and Supertrend both agree the hourly
+    trend is up, 'bearish' only if both agree it's down, and 'neutral'
+    otherwise -- including when they disagree with each other, or when
+    the data fetch itself fails. 'neutral' is intentionally the safe
+    default: this filter's job is to catch a CLEARLY opposing hourly
+    trend, not to require perfect agreement before letting anything
+    through."""
+    try:
+        df = fetch_ohlc_yahoo(symbol, range_=HTF_RANGE, interval=HTF_INTERVAL)
+        if len(df) < 210:
+            print(f"[!] {symbol}: not enough hourly candles for HTF filter ({len(df)}), treating as neutral")
+            return "neutral"
+        df = compute_indicators(df)
+        curr = df.iloc[-1]
+        ema_bullish = curr["close"] > curr["ema_trend"]
+        supertrend_bullish = curr["supertrend_trend"] == 1
+        if ema_bullish and supertrend_bullish:
+            return "bullish"
+        if not ema_bullish and not supertrend_bullish:
+            return "bearish"
+        return "neutral"
+    except Exception as e:
+        print(f"[!] {symbol}: HTF trend check failed ({e}), treating as neutral")
+        return "neutral"
+
+
 def scan_bist_daily(symbol: str) -> dict | None:
     """Like scan_ticker, but fixed to DAILY candles with ~2 years of
     history, regardless of whatever OHLC_RANGE/OHLC_INTERVAL is set to
@@ -265,7 +301,7 @@ def scan_bist_daily(symbol: str) -> dict | None:
         result = score_signal(df)
         classification = classify(result["weighted_total"])
         current_price = df.iloc[-1]["close"]
-        return {"symbol": symbol, "price": current_price, "result": result, "classification": classification}
+        return {"symbol": symbol, "price": current_price, "result": result, "classification": classification, "df": df}
     except Exception as e:
         print(f"[!] {symbol}: BIST daily scan failed ({e})")
         return None
@@ -288,11 +324,16 @@ def send_bist_daily_picks() -> None:
         send_telegram_message(f"Bugün için BIST'te AL / GÜÇLÜ AL sinyali veren hisse yok.\n\nZaman: {now}")
         return
 
-    lines = ["Bugünün öne çıkan BIST hisseleri:", ""]
+    lines = ["Bugünün öne çıkan BIST hisseleri:", "(dünkü kapanışa göre -- Midas'taki canlı fiyatla teyit et)", ""]
     for s in picks:
         label = CLASSIFICATION_TR.get(s["classification"], s["classification"])
-        lines.append(f"  {s['symbol']}: {label} ({s['result']['weighted_total']:+d}/{max_score}) @ {s['price']:.2f}")
-    lines.append(f"\nZaman: {now}")
+        price_range = compute_price_range(s["df"], direction="LONG")
+        lines.append(f"  {s['symbol']}: {label} ({s['result']['weighted_total']:+d}/{max_score})")
+        lines.append(f"    Giriş (dünkü kapanış): {format_eu_number(price_range['entry'], 2)}")
+        lines.append(f"    Hedef: {format_eu_number(price_range['target'], 2)}")
+        lines.append(f"    Geçersizlik: {format_eu_number(price_range['invalidation'], 2)}")
+        lines.append("")
+    lines.append(f"Zaman: {now}")
     send_telegram_message("\n".join(lines))
 
 
@@ -426,6 +467,20 @@ def run_once() -> None:
         if symbol == "QQQ" and not is_qqq_kill_zone(now):
             print(f"    {symbol}: outside kill zone, suppressing alert.")
             continue
+
+        # Higher-timeframe confluence filter: don't fire a 1-min BUY signal
+        # against a clearly bearish hourly trend, or a SELL against a
+        # clearly bullish one. A neutral/mixed hourly read (or a failed
+        # fetch) does NOT block anything -- only a flat-out opposing
+        # trend does.
+        if symbol in HTF_FILTER_SYMBOLS and entry["classification"] != "NO SIGNAL":
+            htf_trend = get_htf_trend(symbol)
+            wants_long = entry["classification"] in ("BUY", "STRONG BUY")
+            wants_short = entry["classification"] in ("SELL", "STRONG SELL")
+            if (wants_long and htf_trend == "bearish") or (wants_short and htf_trend == "bullish"):
+                print(f"    {symbol}: 1-min signal ({entry['classification']}) opposes 1-hour trend "
+                      f"({htf_trend}), suppressing alert.")
+                continue
 
         if entry["classification"] in ("BUY", "STRONG BUY"):
             price_range = compute_price_range(entry["df"], direction="LONG")
