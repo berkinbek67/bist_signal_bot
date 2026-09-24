@@ -7,9 +7,9 @@ academic backtesting behind them -- treat this as a well-defined but
 less rigorously validated addition, not an established indicator.
 
 Kill Zone: a time-window filter, not a directional signal. Sources
-vary somewhat on exact times, but for Nasdaq/QQQ specifically, the
-consensus "high activity" window is the first ~90 minutes after the
-9:30 ET cash open (09:30-11:00 ET).
+vary somewhat on exact times, but for major US index instruments
+(Nasdaq-100, S&P 500), the consensus "high activity" window is the
+NY AM session, starting at the 9:30 ET cash open.
 
 Liquidity Sweep: price levels where two or more recent swing highs
 (or lows) cluster closely together are treated as resting liquidity
@@ -35,21 +35,22 @@ from datetime import datetime, timezone
 import pandas as pd
 from bist_data import NY_TZ
 
-QQQ_KILL_ZONE_START_HOUR = 9
-QQQ_KILL_ZONE_START_MINUTE = 30
-QQQ_KILL_ZONE_END_HOUR = 12  # widened from 11:00 -- matches the broader
-QQQ_KILL_ZONE_END_MINUTE = 0  # "NY AM session" window some ICT sources use
+US_INDEX_KILL_ZONE_START_HOUR = 9
+US_INDEX_KILL_ZONE_START_MINUTE = 30
+US_INDEX_KILL_ZONE_END_HOUR = 12  # widened from 11:00 -- matches the broader
+US_INDEX_KILL_ZONE_END_MINUTE = 0  # "NY AM session" window some ICT sources use
 
 
-def is_qqq_kill_zone(now: datetime | None = None) -> bool:
-    """True during the 09:30-11:00 ET window -- the consensus
-    highest-activity period for Nasdaq/QQQ per ICT sources."""
+def is_us_index_kill_zone(now: datetime | None = None) -> bool:
+    """True during the 09:30-12:00 ET window -- the consensus
+    highest-activity period for major US index instruments per ICT
+    sources. Used for both Nasdaq-100 (^NDX) and S&P 500 (^SPX)."""
     if now is None:
         now = datetime.now(timezone.utc)
     now_ny = now.astimezone(NY_TZ)
 
-    start = now_ny.replace(hour=QQQ_KILL_ZONE_START_HOUR, minute=QQQ_KILL_ZONE_START_MINUTE, second=0, microsecond=0)
-    end = now_ny.replace(hour=QQQ_KILL_ZONE_END_HOUR, minute=QQQ_KILL_ZONE_END_MINUTE, second=0, microsecond=0)
+    start = now_ny.replace(hour=US_INDEX_KILL_ZONE_START_HOUR, minute=US_INDEX_KILL_ZONE_START_MINUTE, second=0, microsecond=0)
+    end = now_ny.replace(hour=US_INDEX_KILL_ZONE_END_HOUR, minute=US_INDEX_KILL_ZONE_END_MINUTE, second=0, microsecond=0)
     return start <= now_ny < end
 
 
