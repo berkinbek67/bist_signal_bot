@@ -7,13 +7,21 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# --- Market settings (Nasdaq/QQQ via Yahoo Finance) ---
+# --- Market settings (US indices via Yahoo Finance) ---
 # Brent (BZ=F) dropped -- Midas charges a flat $1.5 commission per
 # transaction, which made the scalp-style trading this bot was tuned
-# for uneconomical there. QQQ stays in for tracking/notification
-# purposes even though the same commission applies -- you're not
-# trading it live off these alerts, just watching how it performs.
-WATCHLIST = ["QQQ"]
+# for uneconomical there.
+#
+# Switched from the QQQ ETF to the raw indices themselves: ^NDX
+# (Nasdaq-100) and ^SPX (S&P 500). IMPORTANT: these are INDEX tickers,
+# not tradable securities -- you can't buy "^NDX" on Midas. The alert's
+# Entry/Target/Invalidation numbers will be in INDEX POINTS, not a
+# dollar price you can actually place an order at. Use this as a
+# directional read and execute on whatever actual instrument you trade
+# for that exposure (e.g. QQQ for Nasdaq-100, an S&P 500 ETF for
+# ^SPX) -- same idea as the BIST daily scan's stale-price caveat, just
+# for a different reason (different instrument, not just a stale price).
+WATCHLIST = ["^NDX", "^SPX"]
 
 # Symbols messaged as plain AL/SAT instead of "LONG/SHORT pozisyon aç".
 # Empty for now -- every instrument uses the same LONG/SHORT framing.
@@ -26,6 +34,10 @@ CROSS_RATE_PAIRS = {}
 OHLC_RANGE = "5d"    # Yahoo only keeps 1-minute data for the last 7 days -- 5d stays safely inside that limit
 OHLC_INTERVAL = "1m" # candle size -- now on a 1-minute timeframe as requested
 
+# Both ^NDX and ^SPX trade on the same NYSE/Nasdaq cash session and get
+# the same ICT NY AM kill-zone treatment -- neither is BIST/forex-style.
+KILL_ZONE_SYMBOLS = ["^NDX", "^SPX"]
+
 # --- Higher-timeframe confluence filter ---
 # The 1-minute signal is checked against the 1-hour trend before it's
 # allowed to fire -- catches the case where a 1-min liquidity sweep/FVG
@@ -34,7 +46,7 @@ OHLC_INTERVAL = "1m" # candle size -- now on a 1-minute timeframe as requested
 # applied to symbols listed in HTF_FILTER_SYMBOLS; a data-fetch failure
 # or a genuinely mixed hourly read (EMA200 and Supertrend disagree)
 # does NOT block the signal -- only a clearly OPPOSING hourly trend does.
-HTF_FILTER_SYMBOLS = ["QQQ"]
+HTF_FILTER_SYMBOLS = ["^NDX", "^SPX"]
 HTF_INTERVAL = "60m"
 HTF_RANGE = "6mo"
 
