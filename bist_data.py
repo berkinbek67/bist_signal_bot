@@ -16,6 +16,7 @@ hours (10:00-18:00 Istanbul time, Mon-Fri) unlike crypto's 24/7 markets.
 
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+from urllib.parse import quote
 import requests
 import pandas as pd
 
@@ -113,7 +114,9 @@ def fetch_ohlc_yahoo(symbol: str, range_: str = "5d", interval: str = "15m") -> 
     Intraday intervals (under 1d) are only available for recent history
     (Yahoo limits how far back small intervals go).
     """
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    # Index tickers like ^NDX / ^SPX need the '^' percent-encoded in the
+    # URL path -- quote() handles that (and leaves normal tickers as-is).
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(symbol, safe='')}"
     params = {"range": range_, "interval": interval}
     response = requests.get(url, params=params, headers=_HEADERS, timeout=10)
     response.raise_for_status()
