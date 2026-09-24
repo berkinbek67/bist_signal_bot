@@ -1,20 +1,22 @@
 """
-BIST Signal Bot
-----------------
-Scans a watchlist of Borsa Istanbul stocks (via Yahoo Finance), scores
-each on 7 weighted indicators, and:
-  - Sends an individual BUY alert (with Entry/Target/Invalidation) for
-    any stock whose score crosses the threshold, any time during market
-    hours.
-  - Sends one ranked "Top N" summary message shortly after market open.
+Signal Bot
+----------
+Two independent things live in this file:
 
-Only runs during BIST's regular session (10:00-18:00 Istanbul time,
-Mon-Fri) -- outside those hours, it does nothing.
+1. Intraday US index scan (^NDX Nasdaq-100, ^SPX S&P 500), on 1-minute
+   candles, gated to the ICT NY AM kill zone (09:30-12:00 ET) and a
+   1-hour trend confluence filter (see get_htf_trend). Sends a LONG/
+   SHORT alert (with Entry/Target/Invalidation) whenever the weighted
+   score crosses a threshold.
+2. Once-a-day BIST daily-picks scan (see scan_bist_daily /
+   send_bist_daily_picks, triggered separately by bist_daily_scan.py),
+   on daily candles across BIST_30_WATCHLIST.
 
-This does NOT track a position or send active SELL alerts -- you place
-your own limit sell order at the Target price (and optionally a stop at
-Invalidation) manually on your broker's platform. Every check is fully
-independent; there is no state carried between runs.
+This does NOT track a position or send active SELL alerts for the
+index scan -- you place your own limit sell order at the Target price
+(and optionally a stop at Invalidation) manually on your broker's
+platform. Every check is fully independent; there is no state carried
+between runs.
 
 This does NOT place real trades. It only sends alerts.
 """
@@ -24,7 +26,7 @@ import requests
 import pandas as pd
 from datetime import datetime, timezone
 from bist_data import fetch_ohlc_yahoo, fetch_ohlc_cross, is_forex_market_open, is_us_stock_market_open, BIST_30_WATCHLIST
-from ict_concepts import is_qqq_kill_zone, score_liquidity_sweep, score_fair_value_gap
+from ict_concepts import is_us_index_kill_zone, score_liquidity_sweep, score_fair_value_gap
 from supertrend import compute_supertrend, score_supertrend
 from config import (
     TELEGRAM_BOT_TOKEN,
@@ -57,12 +59,14 @@ from config import (
     HTF_FILTER_SYMBOLS,
     HTF_INTERVAL,
     HTF_RANGE,
+    KILL_ZONE_SYMBOLS,
 )
 
 # Which market-hours check applies to each symbol. Anything not listed
 # here defaults to is_forex_market_open (Brent/gold's near-24/5 schedule).
 MARKET_HOURS_CHECKS = {
-    "QQQ": is_us_stock_market_open,
+    "^NDX": is_us_stock_market_open,
+    "^SPX": is_us_stock_market_open,
 }
 
 
@@ -289,9 +293,9 @@ def get_htf_trend(symbol: str) -> str:
 def scan_bist_daily(symbol: str) -> dict | None:
     """Like scan_ticker, but fixed to DAILY candles with ~2 years of
     history, regardless of whatever OHLC_RANGE/OHLC_INTERVAL is set to
-    for the intraday QQQ scan. This is a once-a-day informational read,
+    for the intraday index scan. This is a once-a-day informational read,
     not a live trigger, so there's no reason to fight Yahoo's 1-minute
-    data window or worry about the same staleness that matters for QQQ."""
+    data window or worry about the same staleness that matters intraday."""
     try:
         df = fetch_ohlc_yahoo(symbol, range_=BIST_DAILY_RANGE, interval=BIST_DAILY_INTERVAL)
         if len(df) < 210:
@@ -310,7 +314,7 @@ def scan_bist_daily(symbol: str) -> dict | None:
 def send_bist_daily_picks() -> None:
     """Once-a-day BIST scan (meant to run once each weekday morning via
     its own GitHub Actions schedule -- see bist_daily_scan.py). Runs the
-    exact same weighted scoring engine used for QQQ, but on BIST_30_WATCHLIST
+    exact same weighted scoring engine used for ^NDX/^SPX, but on BIST_30_WATCHLIST
     daily candles, and only reports tickers that actually cross the BUY
     threshold that day -- some days that's none, some days it's several."""
     scanned = [r for r in (scan_bist_daily(s) for s in BIST_30_WATCHLIST) if r is not None]
@@ -383,7 +387,8 @@ def send_night_recap() -> None:
 # ---------- Message formatting (Turkish, Style 3 / dashboard) ----------
 
 DISPLAY_NAMES = {
-    "QQQ": "QQQ",
+    "^NDX": "NASDAQ-100",
+    "^SPX": "SPX",
 }
 
 CLASSIFICATION_TR = {
@@ -460,11 +465,10 @@ def run_once() -> None:
         print(f"    {symbol}: price={entry['price']:.4f} score={entry['result']['weighted_total']} "
               f"classification={entry['classification']}")
 
-        # QQQ alerts only fire during its ICT kill zone (09:30-11:00 ET) --
-        # we still scan and log it across the full session for visibility,
-        # just don't message outside that window. Doesn't apply to the
-        # other instruments.
-        if symbol == "QQQ" and not is_qqq_kill_zone(now):
+        # US index alerts (^NDX, ^SPX) only fire during the ICT kill zone
+        # (09:30-12:00 ET) -- we still scan and log across the full
+        # session for visibility, just don't message outside that window.
+        if symbol in KILL_ZONE_SYMBOLS and not is_us_index_kill_zone(now):
             print(f"    {symbol}: outside kill zone, suppressing alert.")
             continue
 
