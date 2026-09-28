@@ -7,36 +7,42 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# --- Market settings (US indices via Yahoo Finance) ---
+# --- Market settings (US indices via a local MetaTrader 5 terminal) ---
 # Brent (BZ=F) dropped -- Midas charges a flat $1.5 commission per
 # transaction, which made the scalp-style trading this bot was tuned
 # for uneconomical there.
 #
-# Switched from the QQQ ETF to the raw indices themselves: ^NDX
-# (Nasdaq-100) and ^SPX (S&P 500). IMPORTANT: these are INDEX tickers,
-# not tradable securities -- you can't buy "^NDX" on Midas. The alert's
-# Entry/Target/Invalidation numbers will be in INDEX POINTS, not a
-# dollar price you can actually place an order at. Use this as a
-# directional read and execute on whatever actual instrument you trade
-# for that exposure (e.g. QQQ for Nasdaq-100, an S&P 500 ETF for
-# ^SPX) -- same idea as the BIST daily scan's stale-price caveat, just
-# for a different reason (different instrument, not just a stale price).
-WATCHLIST = ["^NDX", "^SPX"]
+# Data source switched from Yahoo Finance to a locally-running, logged-in
+# MT5 terminal (see mt5_data.py) -- the Yahoo ^NDX/^SPX feed was giving
+# prices that didn't match the real market, even allowing for a
+# reasonable delay. MT5 gives your broker's own live feed instead, but
+# ONLY works while MT5 is open and logged in on this same Windows
+# machine -- this is why the bot no longer runs on GitHub Actions and
+# instead runs continuously here (see CHECK_INTERVAL_SECONDS below).
+#
+# These are YOUR broker's own symbol names for the Nasdaq-100 and S&P
+# 500 index CFDs, exactly as they appear in MT5's Market Watch -- they
+# vary by broker (e.g. some use "NAS100"/"US100" and "US500" instead).
+# IMPORTANT: still index/CFD instruments, not necessarily the exact
+# security you'd place a real order on -- use as a directional read and
+# confirm against your broker's live price before trading.
+WATCHLIST = ["NASDAQ", "SPX500"]
 
 # Symbols messaged as plain AL/SAT instead of "LONG/SHORT pozisyon aç".
 # Empty for now -- every instrument uses the same LONG/SHORT framing.
 SPOT_STYLE_SYMBOLS = []
 
-# XAUEUR isn't a real Yahoo ticker -- when scanning it, fetch these two
-# instead and divide (see fetch_ohlc_cross in bist_data.py).
+# XAUEUR isn't a real MT5/Yahoo ticker -- when scanning it, fetch these
+# two instead and divide (see fetch_ohlc_cross in bist_data.py). Not
+# currently wired up for the MT5 path -- only used by the Yahoo fetch.
 CROSS_RATE_PAIRS = {}
 
-OHLC_RANGE = "5d"    # Yahoo only keeps 1-minute data for the last 7 days -- 5d stays safely inside that limit
-OHLC_INTERVAL = "1m" # candle size -- now on a 1-minute timeframe as requested
+OHLC_INTERVAL = "1m"  # candle size for the intraday index scan
+OHLC_MT5_COUNT = 500  # how many recent 1-minute candles to pull from MT5 each scan (enough for EMA200 + a safety margin)
 
-# Both ^NDX and ^SPX trade on the same NYSE/Nasdaq cash session and get
-# the same ICT NY AM kill-zone treatment -- neither is BIST/forex-style.
-KILL_ZONE_SYMBOLS = ["^NDX", "^SPX"]
+# Both NASDAQ and SPX500 trade on the same NYSE/Nasdaq cash session and
+# get the same ICT NY AM kill-zone treatment -- neither is BIST/forex-style.
+KILL_ZONE_SYMBOLS = ["NASDAQ", "SPX500"]
 
 # --- Higher-timeframe confluence filter ---
 # The 1-minute signal is checked against the 1-hour trend before it's
@@ -46,9 +52,9 @@ KILL_ZONE_SYMBOLS = ["^NDX", "^SPX"]
 # applied to symbols listed in HTF_FILTER_SYMBOLS; a data-fetch failure
 # or a genuinely mixed hourly read (EMA200 and Supertrend disagree)
 # does NOT block the signal -- only a clearly OPPOSING hourly trend does.
-HTF_FILTER_SYMBOLS = ["^NDX", "^SPX"]
+HTF_FILTER_SYMBOLS = ["NASDAQ", "SPX500"]
 HTF_INTERVAL = "60m"
-HTF_RANGE = "6mo"
+HTF_MT5_COUNT = 300  # how many recent hourly candles to pull from MT5 for the HTF check
 
 # --- BIST daily picks scan ---
 # Runs once a day (its own GitHub Actions schedule, see
