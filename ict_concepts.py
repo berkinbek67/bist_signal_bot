@@ -29,9 +29,18 @@ to revisit later. Scored the same way as Liquidity Sweep: price has
 to actually trade back INTO the gap and then close back out on the
 far side (a rejection), not just sit near it. A gap that gets fully
 closed through instead of rejected is "used up" and stops signaling.
+
+Session Liquidity Sweep: the same sweep-and-reject logic as Liquidity
+Sweep above, but the levels being swept are the Asia/London/New York
+SESSION high and low (see SESSION_WINDOWS_UTC), not equal-highs/lows
+swing clusters. Classic ICT "session liquidity" idea: each session's
+high/low is resting liquidity that the next session often runs before
+reversing. Only counts once the session that set the level has
+actually closed -- a level from a session still in progress isn't
+"live" yet.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, time
 import pandas as pd
 from bist_data import NY_TZ
 
@@ -319,5 +328,112 @@ def score_fair_value_gap(
     if best_bullish_idx is not None:
         return 1
     if best_bearish_idx is not None:
+        return -1
+    return 0
+
+
+# (start_hour, end_hour) in UTC. London/New York deliberately overlap
+# (13:00-16:00 UTC) -- that's real, not a bug: those are the two most
+# active sessions and they genuinely run concurrently for a few hours.
+SESSION_WINDOWS_UTC = [
+    (0, 8),    # Asia (Tokyo)
+    (8, 16),   # London
+    (13, 21),  # New York
+]
+
+
+def get_most_recent_session_range(
+    df: pd.DataFrame, start_hour: int, end_hour: int, lookback_days: int = 5
+):
+    """
+    Finds the most recently COMPLETED occurrence of the [start_hour,
+    end_hour) UTC session window, walking backward day by day from the
+    date of the current (last) candle until one is found that (a) has
+    already closed as of the current candle and (b) actually has data
+    in it (weekends / not-enough-history days are skipped).
+
+    Returns (session_high, session_low, session_end_time), or None if
+    nothing usable was found within lookback_days. Only ever looks at
+    candles at or before df's last row -- look-ahead safe.
+    """
+    current_time = df.iloc[-1]["close_time"]
+    current_date = current_time.date()
+
+    for days_back in range(0, lookback_days + 1):
+        day = current_date - timedelta(days=days_back)
+        window_start = datetime.combine(day, time(hour=start_hour), tzinfo=timezone.utc)
+        window_end = datetime.combine(day, time(hour=end_hour), tzinfo=timezone.utc)
+
+        if window_end > current_time:
+            continue  # this session hasn't closed yet as of the current candle
+
+        mask = (df["close_time"] >= window_start) & (df["close_time"] < window_end)
+        session_candles = df[mask]
+        if len(session_candles) == 0:
+            continue  # no candles in this window -- try the day before
+
+        return session_candles["high"].max(), session_candles["low"].min(), window_end
+
+    return None
+
+
+def score_session_liquidity_sweep(df: pd.DataFrame, sweep_lookback: int = 20) -> int:
+    """
+    Same sweep-and-reject logic as score_liquidity_sweep, but the levels
+    being swept are the Asia/London/New York SESSION high/low (see
+    SESSION_WINDOWS_UTC) instead of equal-highs/lows swing clusters.
+
+    Bearish sweep (-1): a session's high got wicked through, and price
+    has since closed back below it.
+    Bullish sweep (+1): a session's low got wicked through, and price
+    has since closed back above it.
+
+    Each session's level only becomes "live" for sweeping once that
+    session has actually closed -- candles from before the session
+    ended are never checked against it. Only ever looks at data up to
+    and including the current (last) row -- look-ahead safe, same as
+    score_liquidity_sweep.
+    """
+    highs = df["high"].values
+    lows = df["low"].values
+    n = len(df)
+    current_idx = n - 1
+    current_close = df.iloc[-1]["close"]
+
+    bearish_sweep_idx = None
+    bullish_sweep_idx = None
+
+    for start_hour, end_hour in SESSION_WINDOWS_UTC:
+        session = get_most_recent_session_range(df, start_hour, end_hour)
+        if session is None:
+            continue
+        session_high, session_low, session_end_time = session
+
+        after_session = df["close_time"] > session_end_time
+        if not after_session.any():
+            continue
+        search_start = after_session.idxmax()  # first True -- df has a plain 0..n-1 index
+        if search_start > current_idx:
+            continue
+
+        for i in range(search_start, n):
+            if highs[i] > session_high:
+                if current_close < session_high and (current_idx - i) <= sweep_lookback:
+                    if bearish_sweep_idx is None or i > bearish_sweep_idx:
+                        bearish_sweep_idx = i
+                break  # only the first touch of this level counts as "the sweep"
+
+        for i in range(search_start, n):
+            if lows[i] < session_low:
+                if current_close > session_low and (current_idx - i) <= sweep_lookback:
+                    if bullish_sweep_idx is None or i > bullish_sweep_idx:
+                        bullish_sweep_idx = i
+                break
+
+    if bullish_sweep_idx is not None and bearish_sweep_idx is not None:
+        return 1 if bullish_sweep_idx > bearish_sweep_idx else -1
+    if bullish_sweep_idx is not None:
+        return 1
+    if bearish_sweep_idx is not None:
         return -1
     return 0
