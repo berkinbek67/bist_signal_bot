@@ -34,7 +34,7 @@ import pandas as pd
 from datetime import datetime, timezone
 from bist_data import fetch_ohlc_yahoo, fetch_ohlc_cross, is_forex_market_open, is_us_stock_market_open, BIST_30_WATCHLIST
 from mt5_data import fetch_ohlc_mt5
-from ict_concepts import is_us_index_kill_zone, score_liquidity_sweep, score_fair_value_gap
+from ict_concepts import is_us_index_kill_zone, score_liquidity_sweep, score_fair_value_gap, score_session_liquidity_sweep
 from supertrend import compute_supertrend, score_supertrend
 from config import (
     TELEGRAM_BOT_TOKEN,
@@ -153,6 +153,7 @@ def score_signal(df: pd.DataFrame) -> dict:
     breakdown["Supertrend"] = score_supertrend(curr["supertrend_trend"])
     breakdown["Liquidity Sweep"] = score_liquidity_sweep(df)
     breakdown["Fair Value Gap"] = score_fair_value_gap(df)
+    breakdown["Session Liquidity Sweep"] = score_session_liquidity_sweep(df)
 
     raw_total = sum(breakdown.values())
     weighted_total = sum(val * INDICATOR_WEIGHTS[name] for name, val in breakdown.items())
@@ -400,6 +401,7 @@ def send_night_recap() -> None:
 DISPLAY_NAMES = {
     "NASDAQ": "NASDAQ-100",
     "SPX500": "SPX500",
+    "XAUUSD": "ALTIN (XAUUSD)",
 }
 
 CLASSIFICATION_TR = {
