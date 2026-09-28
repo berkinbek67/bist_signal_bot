@@ -3,14 +3,21 @@ Signal Bot
 ----------
 Two independent things live in this file:
 
-1. Intraday US index scan (^NDX Nasdaq-100, ^SPX S&P 500), on 1-minute
-   candles, gated to the ICT NY AM kill zone (09:30-12:00 ET) and a
-   1-hour trend confluence filter (see get_htf_trend). Sends a LONG/
-   SHORT alert (with Entry/Target/Invalidation) whenever the weighted
-   score crosses a threshold.
+1. Intraday US index scan (NASDAQ Nasdaq-100, SPX500 S&P 500 -- your
+   broker's own symbol names for these, pulled live from a local MT5
+   terminal via mt5_data.py), on 1-minute candles, gated to the ICT NY
+   AM kill zone (09:30-12:00 ET) and a 1-hour trend confluence filter
+   (see get_htf_trend). Sends a LONG/SHORT alert (with Entry/Target/
+   Invalidation) whenever the weighted score crosses a threshold.
+
+   IMPORTANT: this part now requires MT5 to be open and logged in on
+   THIS machine -- it no longer runs on GitHub Actions. Run main.py
+   here and leave it running (see main() below).
+
 2. Once-a-day BIST daily-picks scan (see scan_bist_daily /
    send_bist_daily_picks, triggered separately by bist_daily_scan.py),
-   on daily candles across BIST_30_WATCHLIST.
+   on daily candles across BIST_30_WATCHLIST -- still on Yahoo Finance,
+   unaffected by the MT5 switch, still fine to run on GitHub Actions.
 
 This does NOT track a position or send active SELL alerts for the
 index scan -- you place your own limit sell order at the Target price
@@ -26,6 +33,7 @@ import requests
 import pandas as pd
 from datetime import datetime, timezone
 from bist_data import fetch_ohlc_yahoo, fetch_ohlc_cross, is_forex_market_open, is_us_stock_market_open, BIST_30_WATCHLIST
+from mt5_data import fetch_ohlc_mt5
 from ict_concepts import is_us_index_kill_zone, score_liquidity_sweep, score_fair_value_gap
 from supertrend import compute_supertrend, score_supertrend
 from config import (
@@ -34,8 +42,8 @@ from config import (
     WATCHLIST,
     SPOT_STYLE_SYMBOLS,
     CROSS_RATE_PAIRS,
-    OHLC_RANGE,
     OHLC_INTERVAL,
+    OHLC_MT5_COUNT,
     EMA_FAST,
     EMA_SLOW,
     EMA_TREND,
@@ -58,15 +66,15 @@ from config import (
     BIST_DAILY_INTERVAL,
     HTF_FILTER_SYMBOLS,
     HTF_INTERVAL,
-    HTF_RANGE,
+    HTF_MT5_COUNT,
     KILL_ZONE_SYMBOLS,
 )
 
 # Which market-hours check applies to each symbol. Anything not listed
 # here defaults to is_forex_market_open (Brent/gold's near-24/5 schedule).
 MARKET_HOURS_CHECKS = {
-    "^NDX": is_us_stock_market_open,
-    "^SPX": is_us_stock_market_open,
+    "NASDAQ": is_us_stock_market_open,
+    "SPX500": is_us_stock_market_open,
 }
 
 
@@ -228,15 +236,17 @@ def reply_to_pending_messages(status_text: str) -> None:
 # ---------- Core scan ----------
 
 def scan_ticker(symbol: str) -> dict | None:
-    """Fetch, score, and classify one ticker. Handles both regular Yahoo
-    tickers and computed cross-rate symbols (e.g. XAUEUR). Returns None
-    if data couldn't be fetched (skipped, not a hard failure)."""
+    """Fetch, score, and classify one ticker. WATCHLIST symbols (NASDAQ,
+    SPX500) come live from the local MT5 terminal; a computed cross-rate
+    symbol (e.g. XAUEUR, if one is ever added to CROSS_RATE_PAIRS) still
+    falls back to Yahoo, since that path was never wired up to MT5.
+    Returns None if data couldn't be fetched (skipped, not a hard failure)."""
     try:
         if symbol in CROSS_RATE_PAIRS:
             base_ticker, quote_ticker = CROSS_RATE_PAIRS[symbol]
-            df = fetch_ohlc_cross(base_ticker, quote_ticker, range_=OHLC_RANGE, interval=OHLC_INTERVAL)
+            df = fetch_ohlc_cross(base_ticker, quote_ticker, range_="5d", interval=OHLC_INTERVAL)
         else:
-            df = fetch_ohlc_yahoo(symbol, range_=OHLC_RANGE, interval=OHLC_INTERVAL)
+            df = fetch_ohlc_mt5(symbol, interval=OHLC_INTERVAL, count=OHLC_MT5_COUNT)
 
         if len(df) < 210:
             print(f"[!] {symbol}: not enough candles yet ({len(df)}), skipping")
@@ -272,7 +282,7 @@ def get_htf_trend(symbol: str) -> str:
     trend, not to require perfect agreement before letting anything
     through."""
     try:
-        df = fetch_ohlc_yahoo(symbol, range_=HTF_RANGE, interval=HTF_INTERVAL)
+        df = fetch_ohlc_mt5(symbol, interval=HTF_INTERVAL, count=HTF_MT5_COUNT)
         if len(df) < 210:
             print(f"[!] {symbol}: not enough hourly candles for HTF filter ({len(df)}), treating as neutral")
             return "neutral"
@@ -292,10 +302,10 @@ def get_htf_trend(symbol: str) -> str:
 
 def scan_bist_daily(symbol: str) -> dict | None:
     """Like scan_ticker, but fixed to DAILY candles with ~2 years of
-    history, regardless of whatever OHLC_RANGE/OHLC_INTERVAL is set to
-    for the intraday index scan. This is a once-a-day informational read,
-    not a live trigger, so there's no reason to fight Yahoo's 1-minute
-    data window or worry about the same staleness that matters intraday."""
+    history, regardless of whatever OHLC_INTERVAL is set to for the
+    intraday index scan. This is a once-a-day informational read, not a
+    live trigger, so there's no reason to fight Yahoo's 1-minute data
+    window or worry about the same staleness that matters intraday."""
     try:
         df = fetch_ohlc_yahoo(symbol, range_=BIST_DAILY_RANGE, interval=BIST_DAILY_INTERVAL)
         if len(df) < 210:
@@ -314,7 +324,7 @@ def scan_bist_daily(symbol: str) -> dict | None:
 def send_bist_daily_picks() -> None:
     """Once-a-day BIST scan (meant to run once each weekday morning via
     its own GitHub Actions schedule -- see bist_daily_scan.py). Runs the
-    exact same weighted scoring engine used for ^NDX/^SPX, but on BIST_30_WATCHLIST
+    exact same weighted scoring engine used for NASDAQ/SPX500, but on BIST_30_WATCHLIST
     daily candles, and only reports tickers that actually cross the BUY
     threshold that day -- some days that's none, some days it's several."""
     scanned = [r for r in (scan_bist_daily(s) for s in BIST_30_WATCHLIST) if r is not None]
@@ -343,13 +353,14 @@ def send_bist_daily_picks() -> None:
 
 def fetch_daily_change(symbol: str) -> dict | None:
     """Latest daily close vs the previous daily close, as a % change.
-    Handles both regular tickers and computed cross-rate symbols."""
+    WATCHLIST symbols come from MT5; a cross-rate symbol still falls
+    back to Yahoo (see scan_ticker's docstring for why)."""
     try:
         if symbol in CROSS_RATE_PAIRS:
             base_ticker, quote_ticker = CROSS_RATE_PAIRS[symbol]
             df = fetch_ohlc_cross(base_ticker, quote_ticker, range_="5d", interval="1d")
         else:
-            df = fetch_ohlc_yahoo(symbol, range_="5d", interval="1d")
+            df = fetch_ohlc_mt5(symbol, interval="1d", count=5)
 
         if len(df) < 2:
             return None
@@ -387,8 +398,8 @@ def send_night_recap() -> None:
 # ---------- Message formatting (Turkish, Style 3 / dashboard) ----------
 
 DISPLAY_NAMES = {
-    "^NDX": "NASDAQ-100",
-    "^SPX": "SPX",
+    "NASDAQ": "NASDAQ-100",
+    "SPX500": "SPX500",
 }
 
 CLASSIFICATION_TR = {
@@ -465,7 +476,7 @@ def run_once() -> None:
         print(f"    {symbol}: price={entry['price']:.4f} score={entry['result']['weighted_total']} "
               f"classification={entry['classification']}")
 
-        # US index alerts (^NDX, ^SPX) only fire during the ICT kill zone
+        # US index alerts (NASDAQ, SPX500) only fire during the ICT kill zone
         # (09:30-12:00 ET) -- we still scan and log across the full
         # session for visibility, just don't message outside that window.
         if symbol in KILL_ZONE_SYMBOLS and not is_us_index_kill_zone(now):
