@@ -26,7 +26,14 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # IMPORTANT: still index/CFD instruments, not necessarily the exact
 # security you'd place a real order on -- use as a directional read and
 # confirm against your broker's live price before trading.
-WATCHLIST = ["NASDAQ", "SPX500"]
+#
+# XAUUSD (gold) added too -- unlike the indices, it trades nearly 24/5
+# (not tied to the NYSE/Nasdaq cash session), so it's deliberately left
+# out of KILL_ZONE_SYMBOLS and HTF_FILTER_SYMBOLS below: no time-window
+# gating, no hourly-trend confluence check, just a plain threshold-based
+# alert (same style as the old Brent/gold setup). Add it to either list
+# later if you want those filters applied to it too.
+WATCHLIST = ["NASDAQ", "SPX500", "XAUUSD"]
 
 # Symbols messaged as plain AL/SAT instead of "LONG/SHORT pozisyon aç".
 # Empty for now -- every instrument uses the same LONG/SHORT framing.
@@ -55,6 +62,53 @@ KILL_ZONE_SYMBOLS = ["NASDAQ", "SPX500"]
 HTF_FILTER_SYMBOLS = ["NASDAQ", "SPX500"]
 HTF_INTERVAL = "60m"
 HTF_MT5_COUNT = 300  # how many recent hourly candles to pull from MT5 for the HTF check
+
+# --- ICT strategy extensions (2022 Mentorship Model additions) ---
+# All four toggleable independently. Only applied to ICT_ADVANCED_SYMBOLS
+# (NASDAQ/SPX500) -- XAUUSD stays on the simpler weighted-scoring path
+# for now. See ict_advanced.py for what each one actually does.
+ICT_ADVANCED_SYMBOLS = ["NASDAQ", "SPX500"]
+
+# 1) Kill Zone / Silver Bullet time windows -- REPLACES the single
+# 09:30-12:00 ET kill zone above for symbols in ICT_ADVANCED_SYMBOLS
+# when enabled. Windows are (start_hour, start_minute, end_hour,
+# end_minute) in NEW YORK LOCAL time -- DST-adjusted automatically via
+# zoneinfo, no manual UTC math needed here.
+ICT_KILL_ZONES_ENABLED = True
+ICT_KILL_ZONE_WINDOWS = {
+    "London": (2, 0, 5, 0),
+    "NY AM": (7, 0, 11, 0),
+    "NY PM": (14, 0, 15, 0),
+}
+
+# 2) MSS + Displacement + FVG entry sequence. When enabled, this
+# REPLACES the weighted-score BUY/SELL trigger for ICT_ADVANCED_SYMBOLS
+# -- a signal only fires when sweep -> MSS+displacement -> FVG all show
+# up in that order. Expect far fewer signals than before; that's the
+# point (quality over quantity). When disabled, the old weighted-score
+# classify() trigger is used instead, unchanged.
+ICT_MSS_DISPLACEMENT_ENABLED = True
+FRACTAL_LENGTH = 2          # candles on each side for a swing point (2 = classic Williams fractal)
+ICT_SWEEP_TOLERANCE_PCT = 0.001   # how close two swing points must be to count as "equal highs/lows"
+ICT_SWEEP_LOOKBACK_BARS = 50      # how many bars back a sweep can have happened and still count as "recent"
+DISPLACEMENT_ATR_PERIOD = 14
+DISPLACEMENT_ATR_MULTIPLIER = 1.2  # a candle's body must be >= ATR * this to count as "displacement"
+
+# 3) Counter-liquidity TP/SL. When enabled, REPLACES the old fixed
+# volatility-band TP/SL (compute_price_range) for ICT_ADVANCED_SYMBOLS:
+# TP1/TP2 come from the nearest unclaimed liquidity levels, SL sits
+# beyond the sweep candle's wick, and a setup is dropped entirely if its
+# R:R falls short of MIN_RR_RATIO.
+ICT_COUNTER_LIQUIDITY_TP_ENABLED = True
+EQUAL_LEVEL_TOLERANCE_ATR_FRACTION = 0.10  # equal-high/low tolerance, as a fraction of current ATR
+MIN_RR_RATIO = 1.5
+
+# 4) Asia range + Power of Three -- a DIRECTIONAL FILTER only, never a
+# signal source on its own. Computed once per day during the London
+# kill zone; if a bias is set, only signals in that direction pass
+# until the next day's Asia range resets it.
+ICT_ASIA_PO3_ENABLED = True
+ASIA_RANGE_MAX_ATR_FRACTION = 0.40  # if the Asia range is wider than this fraction of the daily ATR, skip PO3 for the day
 
 # --- BIST daily picks scan ---
 # Runs once a day (its own GitHub Actions schedule, see
@@ -101,6 +155,11 @@ INDICATOR_WEIGHTS = {
                             # academic backtesting track record, fires often on 1m
                             # candles, and overlaps conceptually with Liquidity Sweep.
                             # Bump to 2 later if it proves itself in practice.
+    "Session Liquidity Sweep": 1,  # Asia/London/New York session high-low sweeps --
+                            # same lightweight weighting as the other ICT-style
+                            # factors above. Added specifically for XAUUSD (gold
+                            # reacts strongly to session opens/closes), but applies
+                            # to every WATCHLIST symbol, same as Liquidity Sweep/FVG.
 }
 
 # --- Signal frequency ---
