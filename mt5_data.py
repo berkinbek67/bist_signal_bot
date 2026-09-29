@@ -21,10 +21,12 @@ The BIST daily-picks scan is untouched by any of this -- it still uses
 Yahoo Finance via bist_data.py, since that part was never the problem.
 """
 
+import time as _time_module
 import MetaTrader5 as mt5
 import pandas as pd
 
 _initialized = False
+_broker_utc_offset_seconds = None
 
 # Maps the interval strings used elsewhere in this project ("1m", "60m",
 # etc.) to MT5's own timeframe constants.
@@ -56,6 +58,40 @@ def ensure_connected() -> None:
     _initialized = True
 
 
+def get_broker_utc_offset_seconds(probe_symbol: str = "NASDAQ", force_refresh: bool = False) -> int:
+    """
+    Detects how far the MT5 broker's server clock is from true UTC, in
+    seconds. MT5 candle/tick timestamps are stamped in the BROKER's
+    server time, not necessarily UTC (e.g. a lot of FX/CFD brokers run
+    their servers on GMT+2/GMT+3) -- every hour-of-day-based ICT rule
+    (kill zones, session ranges, Asia range) needs true UTC/NY time to
+    mean anything, so this correction has to happen before any of that.
+
+    Detected by comparing a live tick's server-stamped time against this
+    machine's own UTC clock, then rounding to the nearest 15 minutes --
+    real broker offsets are always whole/half/quarter hours, so this
+    just absorbs network round-trip jitter. Cached after the first call
+    (the offset doesn't change within a session) -- pass
+    force_refresh=True to recompute (e.g. once a day, to stay correct
+    across a DST transition on either side).
+    """
+    global _broker_utc_offset_seconds
+    if _broker_utc_offset_seconds is not None and not force_refresh:
+        return _broker_utc_offset_seconds
+
+    ensure_connected()
+    if not mt5.symbol_select(probe_symbol, True):
+        raise ValueError(f"Broker saat farkini tespit etmek icin sembol secilemedi: {probe_symbol} ({mt5.last_error()})")
+
+    tick = mt5.symbol_info_tick(probe_symbol)
+    if tick is None or tick.time == 0:
+        raise ValueError(f"Broker saat farki tespit edilemedi (tick alinamadi): {probe_symbol} ({mt5.last_error()})")
+
+    raw_offset = tick.time - _time_module.time()
+    _broker_utc_offset_seconds = round(raw_offset / 900) * 900  # nearest 15 minutes
+    return _broker_utc_offset_seconds
+
+
 def fetch_ohlc_mt5(symbol: str, interval: str = "1m", count: int = 500) -> pd.DataFrame:
     """
     Fetch the most recent `count` candles for `symbol` from MT5, as a
@@ -63,6 +99,11 @@ def fetch_ohlc_mt5(symbol: str, interval: str = "1m", count: int = 500) -> pd.Da
     (close_time, open, high, low, close, volume) -- so compute_indicators/
     score_signal/etc. don't need to know or care which source the data
     came from.
+
+    close_time is corrected to true UTC using get_broker_utc_offset_seconds
+    -- without this, every hour-of-day rule (kill zones, sessions, Asia
+    range) would silently be off by however many hours the broker's
+    server clock is shifted.
 
     `count` (a number of candles) replaces Yahoo's range_ string (e.g.
     "5d") -- MT5's API asks how many candles back, not a date range.
@@ -80,9 +121,11 @@ def fetch_ohlc_mt5(symbol: str, interval: str = "1m", count: int = 500) -> pd.Da
     if rates is None or len(rates) == 0:
         raise ValueError(f"MT5'ten veri alinamadi: {symbol} ({mt5.last_error()})")
 
+    offset = get_broker_utc_offset_seconds(symbol)
+
     df = pd.DataFrame(rates)
     df = df.rename(columns={"time": "close_time", "tick_volume": "volume"})
-    df["close_time"] = pd.to_datetime(df["close_time"], unit="s", utc=True)
+    df["close_time"] = pd.to_datetime(df["close_time"] - offset, unit="s", utc=True)
     df = df[["close_time", "open", "high", "low", "close", "volume"]]
     df = df.dropna(subset=["close"]).reset_index(drop=True)
     return df
