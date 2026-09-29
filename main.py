@@ -5,10 +5,16 @@ Two independent things live in this file:
 
 1. Intraday US index scan (NASDAQ Nasdaq-100, SPX500 S&P 500 -- your
    broker's own symbol names for these, pulled live from a local MT5
-   terminal via mt5_data.py), on 1-minute candles, gated to the ICT NY
-   AM kill zone (09:30-12:00 ET) and a 1-hour trend confluence filter
-   (see get_htf_trend). Sends a LONG/SHORT alert (with Entry/Target/
-   Invalidation) whenever the weighted score crosses a threshold.
+   terminal via mt5_data.py), on 1-minute candles. Symbols listed in
+   ICT_ADVANCED_SYMBOLS (see config.py) go through the newer, stricter
+   "2022 Mentorship Model" pipeline (see handle_ict_advanced_symbol /
+   ict_advanced.py) -- multi-window kill zones, a mandatory sweep ->
+   MSS+displacement -> FVG entry sequence, counter-liquidity TP/SL with
+   a minimum R:R, and an Asia-range Power-of-Three directional filter,
+   each independently toggleable in config.py. Any other symbol (e.g.
+   XAUUSD) still uses the older weighted-score pipeline (see
+   handle_legacy_symbol) -- kill zone (09:30-12:00 ET) + 1-hour trend
+   confluence + fixed volatility-band TP/SL, unchanged from before.
 
    IMPORTANT: this part now requires MT5 to be open and logged in on
    THIS machine -- it no longer runs on GitHub Actions. Run main.py
@@ -35,6 +41,14 @@ from datetime import datetime, timezone
 from bist_data import fetch_ohlc_yahoo, fetch_ohlc_cross, is_forex_market_open, is_us_stock_market_open, BIST_30_WATCHLIST
 from mt5_data import fetch_ohlc_mt5
 from ict_concepts import is_us_index_kill_zone, score_liquidity_sweep, score_fair_value_gap, score_session_liquidity_sweep
+from ict_advanced import (
+    get_active_kill_zone,
+    compute_atr,
+    evaluate_ict_entry_sequence,
+    compute_ict_trade_levels,
+    compute_asia_range,
+    compute_po3_bias,
+)
 from supertrend import compute_supertrend, score_supertrend
 from config import (
     TELEGRAM_BOT_TOKEN,
@@ -68,7 +82,26 @@ from config import (
     HTF_INTERVAL,
     HTF_MT5_COUNT,
     KILL_ZONE_SYMBOLS,
+    ICT_ADVANCED_SYMBOLS,
+    ICT_KILL_ZONES_ENABLED,
+    ICT_KILL_ZONE_WINDOWS,
+    ICT_MSS_DISPLACEMENT_ENABLED,
+    FRACTAL_LENGTH,
+    ICT_SWEEP_TOLERANCE_PCT,
+    ICT_SWEEP_LOOKBACK_BARS,
+    DISPLACEMENT_ATR_PERIOD,
+    DISPLACEMENT_ATR_MULTIPLIER,
+    ICT_COUNTER_LIQUIDITY_TP_ENABLED,
+    EQUAL_LEVEL_TOLERANCE_ATR_FRACTION,
+    MIN_RR_RATIO,
+    ICT_ASIA_PO3_ENABLED,
+    ASIA_RANGE_MAX_ATR_FRACTION,
 )
+
+# Per-symbol daily Power-of-Three bias cache: {symbol: {"date": date,
+# "bias": "bullish"/"bearish"/None, "announced": bool}}. Reset
+# implicitly each day since the cached "date" no longer matches "today".
+_daily_bias = {}
 
 # Which market-hours check applies to each symbol. Anything not listed
 # here defaults to is_forex_market_open (Brent/gold's near-24/5 schedule).
@@ -301,6 +334,224 @@ def get_htf_trend(symbol: str) -> str:
         return "neutral"
 
 
+# ---------- ICT advanced pipeline (2022 Mentorship Model additions) ----------
+
+def get_daily_atr(symbol: str, period: int = 14) -> float | None:
+    """Daily-candle ATR, used only by the Asia-range/PO3 filter to judge
+    whether the overnight range was tight enough to trust. A separate,
+    lightweight fetch -- unrelated to the 1-minute OHLC_MT5_COUNT used
+    for the main scan."""
+    try:
+        df = fetch_ohlc_mt5(symbol, interval="1d", count=period + 20)
+        if len(df) < period + 1:
+            return None
+        return compute_atr(df, period=period).iloc[-1]
+    except Exception as e:
+        print(f"[!] {symbol}: daily ATR fetch failed ({e})")
+        return None
+
+
+def update_daily_bias_if_needed(symbol: str, df: pd.DataFrame, now: datetime, active_kill_zone: str | None) -> None:
+    """Computes and caches today's Asia-range PO3 bias once (during the
+    London kill zone only -- that's when the Asia range has just closed
+    and a sweep of it is most meaningful). Sends an informational
+    Telegram message the first time a real bias (not None) is set for
+    the day. A day with no bias (both/neither side swept, or the range
+    too wide) is cached too, so we don't keep re-checking all day."""
+    today = now.date()
+    cached = _daily_bias.get(symbol)
+    if cached and cached["date"] == today:
+        return
+
+    if active_kill_zone != "London":
+        return
+
+    asia = compute_asia_range(df)
+    if asia is None:
+        return
+    asia_high, asia_low, asia_end = asia
+    daily_atr = get_daily_atr(symbol)
+    bias = compute_po3_bias(df, asia_high, asia_low, asia_end, daily_atr, ASIA_RANGE_MAX_ATR_FRACTION)
+
+    _daily_bias[symbol] = {"date": today, "bias": bias}
+
+    if bias is not None:
+        display_name = DISPLAY_NAMES.get(symbol, symbol)
+        bias_tr = "LONG" if bias == "bullish" else "SHORT"
+        reason = "Asya low'u süpürüldü" if bias == "bullish" else "Asya high'ı süpürüldü"
+        send_telegram_message(f"{display_name} günlük bias: {bias_tr} — {reason}")
+        print(f"    {symbol}: PO3 bias set to {bias} ({reason}).")
+
+
+def get_daily_bias(symbol: str, now: datetime) -> str | None:
+    cached = _daily_bias.get(symbol)
+    if cached and cached["date"] == now.date():
+        return cached["bias"]
+    return None
+
+
+def build_ict_alert_message(symbol: str, direction: str, weighted_total: int, kill_zone: str,
+                             levels: dict, data_time: datetime, now: datetime, bias: str | None) -> str:
+    """Message format for the new ICT-advanced pipeline: same box-drawing
+    style as build_buy_alert_message, with the active kill zone, the
+    day's PO3 bias (if any), and TP1/TP2/R:R added underneath."""
+    display_name = DISPLAY_NAMES.get(symbol, symbol)
+    label_tr = "LONG" if direction == "bullish" else "SHORT"
+    max_score = sum(INDICATOR_WEIGHTS.values())
+    check_time_str = now.strftime("%H:%M UTC")
+    data_time_str = data_time.strftime("%H:%M UTC")
+
+    tp2_line = f"TP2        {format_eu_number(levels['tp2'])}\n" if levels.get("tp2") is not None else ""
+    bias_line = f"Günlük bias {('LONG' if bias == 'bullish' else 'SHORT')}\n" if bias else ""
+
+    return (
+        f"━━━━━━━━━━━━━\n"
+        f"  {display_name} · {label_tr}\n"
+        f"━━━━━━━━━━━━━\n"
+        f"→ {label_tr} pozisyon aç\n"
+        f"Kill zone  {kill_zone}\n"
+        f"{bias_line}"
+        f"Skor       {weighted_total:+d}/{max_score}\n"
+        f"Giriş      {format_eu_number(levels['entry'])}\n"
+        f"TP1        {format_eu_number(levels['tp1'])}\n"
+        f"{tp2_line}"
+        f"Stop       {format_eu_number(levels['sl'])}\n"
+        f"R:R        1:{levels['rr']:.2f}\n"
+        f"Veri saati {data_time_str}  (fiyat bu ana ait)\n"
+        f"Kontrol    {check_time_str}  (bot bu ana kontrol etti)\n"
+        f"━━━━━━━━━━━━━"
+    )
+
+
+def handle_ict_advanced_symbol(symbol: str, now: datetime) -> None:
+    """The full new pipeline for symbols in ICT_ADVANCED_SYMBOLS. Each
+    of the 4 features is gated by its own config toggle -- see
+    ict_advanced.py's module docstring for what each one does, and
+    config.py's "ICT strategy extensions" section for every tunable
+    number used here."""
+    try:
+        df = fetch_ohlc_mt5(symbol, interval=OHLC_INTERVAL, count=OHLC_MT5_COUNT)
+    except Exception as e:
+        print(f"[!] {symbol}: scan failed ({e})")
+        return
+    if len(df) < 210:
+        print(f"[!] {symbol}: not enough candles yet ({len(df)}), skipping")
+        return
+
+    if ICT_KILL_ZONES_ENABLED:
+        active_kill_zone = get_active_kill_zone(now, ICT_KILL_ZONE_WINDOWS)
+    else:
+        active_kill_zone = "NY AM" if is_us_index_kill_zone(now) else None
+
+    if ICT_ASIA_PO3_ENABLED:
+        update_daily_bias_if_needed(symbol, df, now, active_kill_zone)
+
+    if active_kill_zone is None:
+        print(f"    {symbol}: outside kill zone, suppressing alert.")
+        return
+
+    df_indic = compute_indicators(df)
+    result = score_signal(df_indic)  # still computed for the message's "Skor" line, not for gating here
+
+    setup = None
+    if ICT_MSS_DISPLACEMENT_ENABLED:
+        setup = evaluate_ict_entry_sequence(
+            df, fractal_length=FRACTAL_LENGTH, sweep_tolerance_pct=ICT_SWEEP_TOLERANCE_PCT,
+            sweep_lookback_bars=ICT_SWEEP_LOOKBACK_BARS, atr_period=DISPLACEMENT_ATR_PERIOD,
+            displacement_atr_multiplier=DISPLACEMENT_ATR_MULTIPLIER,
+        )
+        if setup is None:
+            print(f"    {symbol}: no valid sweep->MSS+displacement->FVG sequence, no signal.")
+            return
+        direction = setup["direction"]
+    else:
+        classification = classify(result["weighted_total"])
+        print(f"    {symbol}: price={df_indic.iloc[-1]['close']:.4f} score={result['weighted_total']} classification={classification}")
+        if classification in ("BUY", "STRONG BUY"):
+            direction = "bullish"
+        elif classification in ("SELL", "STRONG SELL"):
+            direction = "bearish"
+        else:
+            return
+
+    bias = get_daily_bias(symbol, now) if ICT_ASIA_PO3_ENABLED else None
+    if bias is not None and bias != direction:
+        print(f"    {symbol}: {direction} setup opposes today's PO3 bias ({bias}), suppressing.")
+        return
+
+    if symbol in HTF_FILTER_SYMBOLS:
+        htf_trend = get_htf_trend(symbol)
+        if (direction == "bullish" and htf_trend == "bearish") or (direction == "bearish" and htf_trend == "bullish"):
+            print(f"    {symbol}: {direction} setup opposes 1-hour trend ({htf_trend}), suppressing.")
+            return
+
+    data_time = df.iloc[-1]["close_time"]
+
+    if ICT_COUNTER_LIQUIDITY_TP_ENABLED and setup is not None:
+        atr_series = compute_atr(df, period=DISPLACEMENT_ATR_PERIOD)
+        asia_range = None
+        if ICT_ASIA_PO3_ENABLED:
+            asia = compute_asia_range(df)
+            if asia is not None:
+                asia_range = (asia[0], asia[1])
+        levels = compute_ict_trade_levels(df, setup, atr_series, EQUAL_LEVEL_TOLERANCE_ATR_FRACTION, MIN_RR_RATIO, asia_range)
+        if levels is None:
+            print(f"    {symbol}: no counter-liquidity target or R:R below {MIN_RR_RATIO}, suppressing.")
+            return
+        message = build_ict_alert_message(symbol, direction, result["weighted_total"], active_kill_zone, levels, data_time, now, bias)
+    else:
+        price_range = compute_price_range(df_indic, direction="LONG" if direction == "bullish" else "SHORT")
+        fake_entry = {
+            "classification": "STRONG BUY" if direction == "bullish" else "STRONG SELL",
+            "result": result,
+            "df": df_indic,
+        }
+        message = build_buy_alert_message(symbol, fake_entry, price_range, now)
+        message += f"\nKill zone  {active_kill_zone}"
+        if bias:
+            message += f"\nGünlük bias {'LONG' if bias == 'bullish' else 'SHORT'}"
+
+    send_telegram_message(message)
+
+
+def handle_legacy_symbol(symbol: str, now: datetime) -> dict | None:
+    """The original pipeline, unchanged: weighted score -> old single
+    kill zone -> 1-hour confluence -> fixed volatility-band TP/SL. Used
+    for any WATCHLIST symbol NOT in ICT_ADVANCED_SYMBOLS (currently
+    XAUUSD). Returns the scan entry (for run_once's summary count), or
+    None if nothing was fetched."""
+    entry = scan_ticker(symbol)
+    if entry is None:
+        return None
+
+    print(f"    {symbol}: price={entry['price']:.4f} score={entry['result']['weighted_total']} "
+          f"classification={entry['classification']}")
+
+    if symbol in KILL_ZONE_SYMBOLS and not is_us_index_kill_zone(now):
+        print(f"    {symbol}: outside kill zone, suppressing alert.")
+        return entry
+
+    if symbol in HTF_FILTER_SYMBOLS and entry["classification"] != "NO SIGNAL":
+        htf_trend = get_htf_trend(symbol)
+        wants_long = entry["classification"] in ("BUY", "STRONG BUY")
+        wants_short = entry["classification"] in ("SELL", "STRONG SELL")
+        if (wants_long and htf_trend == "bearish") or (wants_short and htf_trend == "bullish"):
+            print(f"    {symbol}: 1-min signal ({entry['classification']}) opposes 1-hour trend "
+                  f"({htf_trend}), suppressing alert.")
+            return entry
+
+    if entry["classification"] in ("BUY", "STRONG BUY"):
+        price_range = compute_price_range(entry["df"], direction="LONG")
+        message = build_buy_alert_message(symbol, entry, price_range, now)
+        send_telegram_message(message)
+    elif entry["classification"] in ("SELL", "STRONG SELL"):
+        price_range = compute_price_range(entry["df"], direction="SHORT")
+        message = build_buy_alert_message(symbol, entry, price_range, now)
+        send_telegram_message(message)
+
+    return entry
+
+
 def scan_bist_daily(symbol: str) -> dict | None:
     """Like scan_ticker, but fixed to DAILY candles with ~2 years of
     history, regardless of whatever OHLC_INTERVAL is set to for the
@@ -470,43 +721,13 @@ def run_once() -> None:
             print(f"    {symbol}: market closed, skipping.")
             continue
 
-        entry = scan_ticker(symbol)
-        if entry is None:
-            continue
-        scanned.append(entry)
-
-        print(f"    {symbol}: price={entry['price']:.4f} score={entry['result']['weighted_total']} "
-              f"classification={entry['classification']}")
-
-        # US index alerts (NASDAQ, SPX500) only fire during the ICT kill zone
-        # (09:30-12:00 ET) -- we still scan and log across the full
-        # session for visibility, just don't message outside that window.
-        if symbol in KILL_ZONE_SYMBOLS and not is_us_index_kill_zone(now):
-            print(f"    {symbol}: outside kill zone, suppressing alert.")
-            continue
-
-        # Higher-timeframe confluence filter: don't fire a 1-min BUY signal
-        # against a clearly bearish hourly trend, or a SELL against a
-        # clearly bullish one. A neutral/mixed hourly read (or a failed
-        # fetch) does NOT block anything -- only a flat-out opposing
-        # trend does.
-        if symbol in HTF_FILTER_SYMBOLS and entry["classification"] != "NO SIGNAL":
-            htf_trend = get_htf_trend(symbol)
-            wants_long = entry["classification"] in ("BUY", "STRONG BUY")
-            wants_short = entry["classification"] in ("SELL", "STRONG SELL")
-            if (wants_long and htf_trend == "bearish") or (wants_short and htf_trend == "bullish"):
-                print(f"    {symbol}: 1-min signal ({entry['classification']}) opposes 1-hour trend "
-                      f"({htf_trend}), suppressing alert.")
-                continue
-
-        if entry["classification"] in ("BUY", "STRONG BUY"):
-            price_range = compute_price_range(entry["df"], direction="LONG")
-            message = build_buy_alert_message(symbol, entry, price_range, now)
-            send_telegram_message(message)
-        elif entry["classification"] in ("SELL", "STRONG SELL"):
-            price_range = compute_price_range(entry["df"], direction="SHORT")
-            message = build_buy_alert_message(symbol, entry, price_range, now)
-            send_telegram_message(message)
+        if symbol in ICT_ADVANCED_SYMBOLS:
+            handle_ict_advanced_symbol(symbol, now)
+            scanned.append(symbol)
+        else:
+            entry = handle_legacy_symbol(symbol, now)
+            if entry is not None:
+                scanned.append(entry)
 
     if scanned:
         reply_to_pending_messages(f"Last scan covered {len(scanned)}/{len(WATCHLIST)} instruments.")
